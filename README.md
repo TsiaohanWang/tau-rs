@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-68%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-104%20passing-brightgreen)](#testing)
 
 ---
 
@@ -12,7 +12,7 @@
 
 **tau-rs** is a from-scratch Rust rewrite of HuggingFace's Tau Python coding agent. The goal is to produce an idiomatic Rust implementation that is **byte-for-byte wire-compatible** with the existing Python agent — meaning both implementations can read and write the same `~/.tau/` session files, credentials, and provider configurations interchangeably.
 
-The project is structured as a Cargo workspace with four crates, each corresponding to a distinct architectural layer.
+The project is structured as a Cargo workspace with five crates, each corresponding to a distinct architectural layer.
 
 ### Why Rust?
 
@@ -36,10 +36,13 @@ tau-rs/
 │   ├── tau-types/             # Wire contract — pure serde data models
 │   ├── tau-agent/             # Agent brain — provider trait, tool protocol, event loop, harness
 │   ├── tau-ai/                # Provider adapters — Anthropic, OpenAI-compatible, SSE, retry
+│   ├── tau-coding/            # Coding domain — built-in tools (read/write/edit/bash), session storage, catalog merge
 │   └── tau-cli/               # CLI binary — print mode, REPL, config management
 ├── docs/
 │   ├── architecture.md        # Full architecture design document (Chinese)
 │   ├── phase-1.md             # Phase 1 implementation plan with ADRs
+│   ├── phase-3.md             # Phase 3 implementation plan
+│   ├── phase-4.md             # Phase 4 implementation plan
 │   └── gap-analysis.md        # Gap analysis vs Python original
 └── rust-toolchain.toml        # Rust stable + rustfmt + clippy
 ```
@@ -52,11 +55,13 @@ tau-types  (no async, no HTTP — pure serde)
 tau-agent  (provider trait, tool trait, loop, harness, session)
     ↑
 tau-ai     (Anthropic/OpenAI adapters, SSE, retry, HTTP)
+    ↑                                  ↑
+tau-coding (tools, session storage,    │ catalog merge)
     ↑
 tau-cli    (binary: clap CLI, REPL, print mode)
 ```
 
-Key design principle: **`tau-agent` owns the `ModelProvider` trait**, not `tau-ai`. This inverts the naive dependency direction and ensures the core brain crate has no HTTP dependencies.
+Key design principle: **`tau-agent` owns the `ModelProvider` trait**, not `tau-ai`. This inverts the naive dependency direction and ensures the core brain crate has no HTTP dependencies. `tau-coding` builds on top of `tau-agent` + `tau-ai`, providing the coding-specific layer (tools, on-disk session storage, and catalog merging) consumed by `tau-cli`.
 
 ---
 
@@ -121,6 +126,21 @@ The user-facing application entry point.
 |---|---|
 | `main` | clap CLI with `--print`/`-p`, `--provider`/`-P`, `--model`/`-m`, `--system`/`-S`, `--max-tokens`/`-M`, `--verbose`/`-v`; `Providers` and `Config` subcommands |
 | `config` | `TauHome` (with `TAU_HOME` env override), `ProvidersConfig`, `CredentialsConfig`, `CatalogConfig`, `resolve_api_key()`, `ProviderKind` |
+
+### `tau-coding` — Coding Domain
+
+The coding-specific layer that wires `tau-agent` + `tau-ai` into a usable coding agent: built-in file tools, on-disk session storage, and catalog merging.
+
+| Module | Contents |
+|---|---|
+| `tools` | `create_coding_tools()` — built-in tools: `read` (read file, optional offset/limit), `write` (truncate/overwrite), `edit` (string-replace with occurrence control), `bash` (shell command w/ optional timeout). Each implements `tau_agent::tool::AgentTool` |
+| `session/storage` | `JsonlSessionStorage` — atomic read/append over JSONL session files (tolerant of blank lines, surfaces malformed-line errors with line number, applies v1 migration on read) |
+| `session/manager` | `SessionManager` — per-project directory hashing (`SHA-256(path)[..12]`), `create`/`load`/`list`, `index.jsonl` append |
+| `config/catalog` | `CatalogConfig`/`CatalogProvider`/`ProviderKind`, `merge_catalogs()` (overlay-replaces-base on provider name), built-in catalog embedded via `include_str!` |
+
+**Phase 3 scope**: built-in `read`/`write`/`edit`/`bash` tools (no context-window / AGENTS.md / skills in v1 — deferred).
+
+**Phase 4 scope**: `JsonlSessionStorage` + `SessionManager` (session persistence) and `merge_catalogs` (catalog merge) integrated into the CLI — print and REPL modes now persist `SessionInfo` + `MessageEntry` + `LeafEntry` rows per turn.
 
 ---
 
@@ -336,9 +356,18 @@ crates/
 │   │   ├── test_anthropic.rs  # 6 wiremock tests
 │   │   └── test_openai.rs     # 6 wiremock tests
 │   └── Cargo.toml
-└── tau-cli/                   # ~800 lines
+├── tau-coding/                # Phase 3+4: tools + session storage + catalog
+│   ├── src/
+│   │   ├── lib.rs
+│   │   ├── tools/             # read / write / edit / bash + factory
+│   │   ├── session/           # storage.rs (JsonlSessionStorage), manager.rs (SessionManager)
+│   │   └── config/catalog.rs  # merge_catalogs + embedded built-in catalog
+│   ├── data/
+│   │   └── catalog.toml       # Built-in provider catalog (embedded via include_str!)
+│   └── Cargo.toml
+└── tau-cli/                   # ~900 lines
     ├── src/
-    │   ├── main.rs            # CLI entry point, REPL, print mode
+    │   ├── main.rs            # CLI entry point, REPL, print mode, session persistence
     │   └── config.rs          # Configuration loading
     ├── tests/
     │   └── test_cli.rs        # 10 integration tests
@@ -358,10 +387,11 @@ cargo test --workspace --features tau-agent/testing
 cargo test -p tau-types
 cargo test -p tau-agent --features testing
 cargo test -p tau-ai
+cargo test -p tau-coding
 cargo test -p tau-cli
 
-# Clippy lint
-cargo clippy --workspace --features tau-agent/testing
+# Clippy lint (enforced: warnings are errors)
+cargo clippy --workspace --all-targets --features tau-agent/testing -- -D warnings
 
 # Format check
 cargo fmt --check
@@ -369,15 +399,16 @@ cargo fmt --check
 
 ### Testing Strategy
 
-The test suite includes **68 tests** across unit, integration, and wiremock levels:
+The test suite includes **104 tests** across unit, integration, and wiremock levels:
 
 | Crate | Unit Tests | Integration Tests | Total |
 |---|---|---|---|
 | `tau-types` | 10 | — | 10 |
 | `tau-agent` | 5 | 11 (loop + harness) | 16 |
 | `tau-ai` | — | 12 (wiremock HTTP mocks) | 12 |
+| `tau-coding` | 36 (17 tools + 12 session + 8 catalog) | — | 36 |
 | `tau-cli` | — | 10 (subprocess CLI tests) | 10 |
-| **Total** | **15** | **33** | **68** |
+| **Total** | **51** | **33** | **104** |
 
 **Integration test patterns**:
 - `tau-ai` tests use [wiremock](https://github.com/LukeMathWalker/wiremock-rs) to mock HTTP responses and verify SSE parsing + retry behavior
@@ -426,8 +457,8 @@ tau-rs is designed to be **fully compatible** with existing `~/.tau/` data from 
 | Phase 0 | ✅ Done | Workspace skeleton, toolchain, CI |
 | Phase 1 | ✅ Done | `tau-types` + `tau-agent` core (wire models, events, session replay, loop, harness, FakeProvider) |
 | Phase 2 | ✅ Done | `tau-ai` (Anthropic + OpenAI providers, SSE, retry, HTTP) |
-| Phase 3 | ✅ Done | `tau-cli` (CLI binary, print mode, REPL, config) |
-| Phase 4 | 🔲 Planned | Built-in tools (read/write/edit/bash), context window, AGENTS.md discovery |
+| Phase 3 | ✅ Done | Built-in tools (read/write/edit/bash) + `tau-cli` harness integration (print mode, REPL, config) |
+| Phase 4 | ✅ Done | Session persistence (`JsonlSessionStorage` + `SessionManager`) and catalog merge (`merge_catalogs` + embedded built-in catalog) integrated into CLI |
 | Phase 5 | 🔲 Planned | `CodingSession` composition root, compaction, commands |
 | Phase 6 | 🔲 Planned | Advanced REPL (rustyline, history, autocomplete) |
 | Phase 7 | 🔲 Planned | ratatui TUI |
