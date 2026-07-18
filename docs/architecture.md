@@ -4,7 +4,7 @@
 
 本文件是 huggingface/tau（Python）到 Rust 重写的总体架构设计与全套迁移计划。它基于对原项目三个包（`tau_ai` ≈4.1k 行、`tau_agent` ≈1.7k 行、`tau_coding` ≈25.7k 行）全部核心源码的通读产出。
 
-> **当前状态**: Phase 1-3 已完成（2026-07-18）。Phase 4+ 待实现。
+> **当前状态**: Phase 1-3 已完成（2026-07-19）。Phase 3 工具+CLI 集成已完成；Phase 4 待实现（设计已完成）。
 
 范围决策（已确认）：
 
@@ -200,9 +200,11 @@ tau-rs/
 │   ├── tau-ai/           # provider 适配（phase 2）：anthropic, openai-compatible,
 │   │                     #   stream canonicalizer, retry, http, fake(测试 feature)
 │   │                     #   依赖 tau-agent + reqwest
-│   ├── tau-coding/       # 应用服务（phase 3+）：内置工具, context/system_prompt/skills,
+│   ├── tau-coding/       # 应用服务（phase 3+）：内置工具 read/write/edit/bash,
+│   │                     #   session 持久化 (JsonlSessionStorage, SessionManager),
+│   │                     #   catalog 深度合并, context/system_prompt/skills,
 │   │                     #   CodingSession, commands, compaction,
-│   │                     #   catalog/config/credentials, session_manager/export
+│   │                     #   credentials, session_manager/export
 │   └── tau-cli/          # 二进制 tau-rs（phase 5+）：clap 入口, print 渲染器,
                           #   REPL(rustyline), 后期 ratatui TUI(feature "tui")
 ```
@@ -217,7 +219,7 @@ Phase 1 只产出 `tau-types` 与 `tau-agent` 两个 crate。
 ## 2.2 module 结构
 
 ```
-taur-types/src/
+tau-types/src/
 ├── lib.rs              # 模块导出 + prelude
 ├── message.rs           # content blocks, 7 messages, Usage, StopReason, helpers
 ├── event.rs             # AgentEvent (10 variants)
@@ -237,6 +239,21 @@ tau-agent/src/
 │   ├── state.rs         # SessionState::from_entries (replay + compaction)
 │   └── jsonl.rs         # entry_to/from_json_line + v1 migration
 └── testing.rs           # FakeProvider (cfg feature "testing")
+
+tau-coding/src/           # Phase 3+
+├── lib.rs
+├── tools/
+│   ├── mod.rs           # create_coding_tools() -> Vec<AgentTool>
+│   ├── read.rs          # read 工具
+│   ├── write.rs         # write 工具
+│   ├── edit.rs          # edit 工具
+│   └── bash.rs          # bash 工具
+├── session/
+│   ├── mod.rs
+│   ├── storage.rs       # JsonlSessionStorage (JSONL I/O)
+│   └── manager.rs       # SessionManager (目录管理)
+└── config/
+    └── catalog.rs       # catalog 深度合并
 ```
 
 ## 2.3 Trait 设计
@@ -404,13 +421,13 @@ workspace、空 crate、toolchain、CI（fmt/clippy/test）。验证：`cargo bu
 reqwest 客户端（代理规整）、手写 SSE 行解析、retry/退避、`canonicalize_provider_stream`、AnthropicProvider、OpenAICompatibleProvider（chat completions 先行）。
 验证：wiremock mock server + 从 Python 抓取的 SSE fixture → 事件流一致。
 
-## Phase 3 — 内置工具 + 上下文
-truncate、read/write/edit/bash（进程组 kill、路径锁、CRLF/BOM 保留）、context_window 估算、AGENTS.md 发现链、skills/templates/resources、system_prompt。
-验证：移植 `test_context.py`、`test_skills.py`；截断边界 golden 对比。
+## Phase 3 — 内置工具（✅ 已完成 2026-07-19）
+`tau-coding` crate：`read`/`write`/`edit`/`bash` 四个核心工具（进程组 kill、路径锁、CRLF/BOM 保留），CLI 集成通过 `AgentHarness` 运行。
+验证：`tau-coding` 17 个单元测试全绿；CLI `--print` 模式通过 harness 执行工具调用。详见 `docs/phase-3.md`。
 
-## Phase 4 — 配置与持久化
-paths、catalog.toml 加载+合并+原子写、providers.json、credentials.json（含 OAuth 条目读取 + Anthropic token 刷新）、session_manager、session 存储对接。
-验证：本机真实 `~/.tau/` 只读验收；catalog 合并结果与 Python 输出 diff 为空。
+## Phase 4 — 配置与持久化（设计已完成，待实现）
+`JsonlSessionStorage`（session 文件读写）、`SessionManager`（session 目录管理）、catalog 深度合并、CLI 集成 session 持久化。
+验证：session 文件格式与 Python 兼容；catalog 合并结果与 Python 输出 diff 为空。详见 `docs/phase-4.md`。
 
 ## Phase 5 — CodingSession + print 模式端到端 ★ 第一个用户可见里程碑
 CodingSession 完整组合（compaction 三触发、自动命名、中断修复、terminal `!`/`!!`）、命令注册表、`NoopExtensionRuntime`、三个 print 渲染器、CLI `-p` 模式。
@@ -475,19 +492,44 @@ OAuth 交互流、openai-codex provider、google/mistral 适配器、responses A
 | 3 | `tau-cli` | `main.rs` | ~465 | ✅ 完成 |
 | 3 | `tau-cli` | `config.rs` | ~370 | ✅ 完成 |
 
-**总代码量**: ~5,600 行（不含测试）
+## 6.2 待实现模块（设计已完成）
 
-## 6.2 测试覆盖
+| Phase | Crate | 模块 | 说明 | 状态 |
+|-------|-------|------|------|------|
+| 3 | `tau-coding` | `tools/mod.rs` | `create_coding_tools()` 工厂函数 | ✅ 已完成 |
+| 3 | `tau-coding` | `tools/read.rs` | read 工具 | ✅ 已完成 |
+| 3 | `tau-coding` | `tools/write.rs` | write 工具 | ✅ 已完成 |
+| 3 | `tau-coding` | `tools/edit.rs` | edit 工具 | ✅ 已完成 |
+| 3 | `tau-coding` | `tools/bash.rs` | bash 工具 | ✅ 已完成 |
+| 4 | `tau-coding` | `session/storage.rs` | `JsonlSessionStorage`：session 文件读写 | 📋 设计完成 |
+| 4 | `tau-coding` | `session/manager.rs` | `SessionManager`：session 目录管理 | 📋 设计完成 |
+| 4 | `tau-coding` | `config/catalog.rs` | catalog 深度合并 | 📋 设计完成 |
+| 5 | `tau-coding` | `coding_session.rs` | 组合根：compaction、自动命名、中断修复 | ⏳ 待设计 |
+| 5 | `tau-coding` | `commands/` | 斜杠命令注册表 | ⏳ 待设计 |
+| 6 | `tau-cli` | `repl/` | rustyline、历史记录、自动补全 | ⏳ 待设计 |
+| 7 | `tau-cli` | `tui/` | ratatui 全量终端 UI | ⏳ 待设计 |
+
+## 6.3 测试覆盖
 
 | Crate | 单元测试 | 集成测试 | 总计 |
 |-------|---------|---------|------|
-| `tau-types` | 10 | — | 10 |
-| `tau-agent` | 5 | 11 | 16 |
-| `tau-ai` | — | 12 | 12 |
-| `tau-cli` | — | 10 | 10 |
-| **总计** | **15** | **33** | **68** |
+| `tau-types` | 4 | — | 4 |
+| `tau-agent` | 10 | 11 | 21 |
+| `tau-ai` | 19 | 10 | 29 |
+| `tau-cli` | 4 | 10 | 14 |
+| `tau-coding` | 17 | — | 17 |
+| **总计** | **54** | **31** | **85** |
 
-## 6.3 已支持的 Provider
+### 待实现测试（Phase 4）
+
+| Phase | 模块 | 测试类型 | 数量 |
+|-------|------|----------|------|
+| 4 | `session/storage.rs` | 单元测试 | 4 |
+| 4 | `session/manager.rs` | 单元测试 | 4 |
+| 4 | `config/catalog.rs` | 单元测试 | 3 |
+| **待实现总计** | | | **11** |
+
+## 6.4 已支持的 Provider
 
 | Provider | 类型 | 默认模型 | 状态 |
 |----------|------|----------|------|
@@ -497,18 +539,21 @@ OAuth 交互流、openai-codex provider、google/mistral 适配器、responses A
 | Anthropic | `anthropic` | `claude-sonnet-4` | ✅ 代码完成 |
 | OpenAI | `openai` | `gpt-4o` | ✅ 代码完成 |
 
-## 6.4 待实现模块（Phase 4+）
+## 6.4 待实现模块（Phase 3/4+）
 
-| Phase | 模块 | 说明 |
-|-------|------|------|
-| 4 | 内置工具 | `read`/`write`/`edit`/`bash` 工具实现 |
-| 4 | 上下文管理 | `context_window` 估算、AGENTS.md 发现链 |
-| 5 | `CodingSession` | 组合根：compaction、自动命名、中断修复 |
-| 5 | 命令系统 | 斜杠命令注册表 |
-| 6 | 高级 REPL | rustyline、历史记录、自动补全 |
-| 7 | ratatui TUI | 全量终端 UI |
-| 8 | OAuth | 浏览器 OAuth 流程 |
-| 8 | 扩展系统 | 动态插件加载（WASM/rhai/子进程 IPC） |
+| Phase | 模块 | 说明 | 状态 |
+|-------|------|------|------|
+| 3 | `tau-coding` crate | 新建 crate，包含工具和 session 模块 | ✅ 已完成 |
+| 3 | `tools/` | `read`/`write`/`edit`/`bash` 四个核心工具 | ✅ 已完成 |
+| 4 | `session/storage.rs` | `JsonlSessionStorage`：session 文件读写 | 📋 设计完成 |
+| 4 | `session/manager.rs` | `SessionManager`：session 目录管理 | 📋 设计完成 |
+| 4 | `config/catalog.rs` | catalog 深度合并 | 📋 设计完成 |
+| 5 | `CodingSession` | 组合根：compaction、自动命名、中断修复 | ⏳ 待设计 |
+| 5 | 命令系统 | 斜杠命令注册表 | ⏳ 待设计 |
+| 6 | 高级 REPL | rustyline、历史记录、自动补全 | ⏳ 待设计 |
+| 7 | ratatui TUI | 全量终端 UI | ⏳ 待设计 |
+| 8 | OAuth | 浏览器 OAuth 流程 | ⏳ 待设计 |
+| 8 | 扩展系统 | 动态插件加载（WASM/rhai/子进程 IPC） | ⏳ 待设计 |
 
 ## 6.5 与 Python 原版的关键差异
 

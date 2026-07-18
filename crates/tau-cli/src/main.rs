@@ -1,14 +1,17 @@
 mod config;
 
 use std::io::{self, BufRead, Write};
+use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
-use tau_ai::anthropic::{AnthropicConfig, AnthropicProvider};
-use tau_ai::openai::{OpenAIConfig, OpenAIProvider};
-use tau_ai::stream::ProviderEvent;
-use tau_types::{AgentMessage, UserMessage};
+use tau_agent::harness::{AgentHarness, AgentHarnessConfig, QueueMode};
+use tau_agent::provider::ModelProvider;
+use tau_ai::anthropic::{AnthropicConfig, AnthropicModelProvider, AnthropicProvider};
+use tau_ai::openai::{OpenAIConfig, OpenAIModelProvider, OpenAIProvider};
+use tau_types::AgentEvent;
 
 #[derive(Parser)]
 #[command(
@@ -145,31 +148,35 @@ async fn main() -> anyhow::Result<()> {
 
             if cli.print {
                 let prompt = prompt_text.context("--print requires a prompt argument")?;
+                let cwd = std::env::current_dir().context("failed to get current directory")?;
                 match kind {
                     config::ProviderKind::Anthropic => {
                         let cfg = AnthropicConfig {
                             api_key,
                             base_url,
-                            model,
+                            model: model.clone(),
                             max_tokens: cli.max_tokens,
                             max_retries,
                             timeout_seconds: timeout,
                             ..Default::default()
                         };
                         let provider = AnthropicProvider::new(cfg);
-                        print_once_anthropic(&provider, &system, &prompt).await?;
+                        let model_provider = AnthropicModelProvider::new(provider);
+                        print_once_anthropic(&model_provider, &system, &prompt, &model, &cwd)
+                            .await?;
                     }
                     config::ProviderKind::OpenaiCompatible => {
                         let cfg = OpenAIConfig {
                             api_key,
                             base_url,
-                            model,
+                            model: model.clone(),
                             max_retries,
                             timeout_seconds: timeout,
                             ..Default::default()
                         };
                         let provider = OpenAIProvider::new(cfg);
-                        print_once_openai(&provider, &system, &prompt).await?;
+                        let model_provider = OpenAIModelProvider::new(provider);
+                        print_once_openai(&model_provider, &system, &prompt, &model, &cwd).await?;
                     }
                 }
             } else {
@@ -181,28 +188,30 @@ async fn main() -> anyhow::Result<()> {
                         let cfg = AnthropicConfig {
                             api_key,
                             base_url,
-                            model,
+                            model: model.clone(),
                             max_tokens: cli.max_tokens,
                             max_retries,
                             timeout_seconds: timeout,
                             ..Default::default()
                         };
                         let provider = AnthropicProvider::new(cfg);
+                        let model_provider = AnthropicModelProvider::new(provider);
                         eprintln!("tau-rs (anthropic) | type your message (Ctrl-D to exit)");
-                        run_repl_anthropic(&provider, &system).await?;
+                        run_repl_anthropic(&model_provider, &system, &model).await?;
                     }
                     config::ProviderKind::OpenaiCompatible => {
                         let cfg = OpenAIConfig {
                             api_key,
                             base_url,
-                            model,
+                            model: model.clone(),
                             max_retries,
                             timeout_seconds: timeout,
                             ..Default::default()
                         };
                         let provider = OpenAIProvider::new(cfg);
+                        let model_provider = OpenAIModelProvider::new(provider);
                         eprintln!("tau-rs (openai) | type your message (Ctrl-D to exit)");
-                        run_repl_openai(&provider, &system).await?;
+                        run_repl_openai(&model_provider, &system, &model).await?;
                     }
                 }
             }
@@ -283,11 +292,29 @@ fn cmd_config(
 // REPL — consumes raw ProviderEvent streams directly
 // ---------------------------------------------------------------------------
 
-async fn run_repl_anthropic(provider: &AnthropicProvider, system: &str) -> anyhow::Result<()> {
+async fn run_repl_anthropic(
+    provider: &AnthropicModelProvider,
+    system: &str,
+    model: &str,
+) -> anyhow::Result<()> {
     let stdin = io::stdin();
     let mut reader = stdin.lock().lines();
     let stdout = io::stdout();
     let mut out = stdout.lock();
+
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+    let tools = tau_coding::tools::create_coding_tools(&cwd);
+
+    let harness = AgentHarness::new(AgentHarnessConfig {
+        provider: Arc::new(provider.clone()) as Arc<dyn ModelProvider + Send + Sync>,
+        model: model.to_string(),
+        system: system.to_string(),
+        tools,
+        max_turns: Some(20),
+        queue_mode: QueueMode::OneAtATime,
+        before_tool_call: None,
+        after_tool_call: None,
+    });
 
     loop {
         write!(out, "You: ")?;
@@ -306,25 +333,23 @@ async fn run_repl_anthropic(provider: &AnthropicProvider, system: &str) -> anyho
             continue;
         }
 
-        let messages: Vec<AgentMessage> = vec![AgentMessage::User(UserMessage::new(line.as_str()))];
-
         write!(out, "Assistant: ")?;
         out.flush()?;
 
-        let stream = provider.stream_response(system, &messages, &[]);
+        let stream = harness.prompt(line)?;
         futures::pin_mut!(stream);
         while let Some(event) = stream.next().await {
             match event {
-                ProviderEvent::TextDelta(delta) => {
-                    write!(out, "{delta}")?;
-                    out.flush()?;
+                AgentEvent::MessageUpdate(update) => {
+                    if let tau_types::AssistantMessageEvent::TextDelta(delta) =
+                        &update.assistant_message_event
+                    {
+                        write!(out, "{}", delta.delta)?;
+                        out.flush()?;
+                    }
                 }
-                ProviderEvent::ResponseEnd { .. } => {
+                AgentEvent::AgentEnd(_) => {
                     writeln!(out)?;
-                }
-                ProviderEvent::Error { message, .. } => {
-                    writeln!(out)?;
-                    eprintln!("  [error: {message}]");
                 }
                 _ => {}
             }
@@ -333,11 +358,30 @@ async fn run_repl_anthropic(provider: &AnthropicProvider, system: &str) -> anyho
 
     Ok(())
 }
-async fn run_repl_openai(provider: &OpenAIProvider, system: &str) -> anyhow::Result<()> {
+
+async fn run_repl_openai(
+    provider: &OpenAIModelProvider,
+    system: &str,
+    model: &str,
+) -> anyhow::Result<()> {
     let stdin = io::stdin();
     let mut reader = stdin.lock().lines();
     let stdout = io::stdout();
     let mut out = stdout.lock();
+
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+    let tools = tau_coding::tools::create_coding_tools(&cwd);
+
+    let harness = AgentHarness::new(AgentHarnessConfig {
+        provider: Arc::new(provider.clone()) as Arc<dyn ModelProvider + Send + Sync>,
+        model: model.to_string(),
+        system: system.to_string(),
+        tools,
+        max_turns: Some(20),
+        queue_mode: QueueMode::OneAtATime,
+        before_tool_call: None,
+        after_tool_call: None,
+    });
 
     loop {
         write!(out, "You: ")?;
@@ -356,25 +400,23 @@ async fn run_repl_openai(provider: &OpenAIProvider, system: &str) -> anyhow::Res
             continue;
         }
 
-        let messages: Vec<AgentMessage> = vec![AgentMessage::User(UserMessage::new(line.as_str()))];
-
         write!(out, "Assistant: ")?;
         out.flush()?;
 
-        let stream = provider.stream_response(system, &messages, &[]);
+        let stream = harness.prompt(line)?;
         futures::pin_mut!(stream);
         while let Some(event) = stream.next().await {
             match event {
-                ProviderEvent::TextDelta(delta) => {
-                    write!(out, "{delta}")?;
-                    out.flush()?;
+                AgentEvent::MessageUpdate(update) => {
+                    if let tau_types::AssistantMessageEvent::TextDelta(delta) =
+                        &update.assistant_message_event
+                    {
+                        write!(out, "{}", delta.delta)?;
+                        out.flush()?;
+                    }
                 }
-                ProviderEvent::ResponseEnd { .. } => {
+                AgentEvent::AgentEnd(_) => {
                     writeln!(out)?;
-                }
-                ProviderEvent::Error { message, .. } => {
-                    writeln!(out)?;
-                    eprintln!("  [error: {message}]");
                 }
                 _ => {}
             }
@@ -389,37 +431,49 @@ async fn run_repl_openai(provider: &OpenAIProvider, system: &str) -> anyhow::Res
 // ---------------------------------------------------------------------------
 
 async fn print_once_anthropic(
-    provider: &AnthropicProvider,
+    provider: &AnthropicModelProvider,
     system: &str,
     prompt: &str,
+    model: &str,
+    cwd: &Path,
 ) -> anyhow::Result<()> {
-    let messages: Vec<AgentMessage> = vec![AgentMessage::User(UserMessage::new(prompt))];
-    let stream = provider.stream_response(system, &messages, &[]);
+    let tools = tau_coding::tools::create_coding_tools(cwd);
+
+    let harness = AgentHarness::new(AgentHarnessConfig {
+        provider: Arc::new(provider.clone()) as Arc<dyn ModelProvider + Send + Sync>,
+        model: model.to_string(),
+        system: system.to_string(),
+        tools,
+        max_turns: Some(20),
+        queue_mode: QueueMode::OneAtATime,
+        before_tool_call: None,
+        after_tool_call: None,
+    });
+
+    let stream = harness.prompt(prompt)?;
     futures::pin_mut!(stream);
     let stdout = io::stdout();
     let mut out = stdout.lock();
     let mut got_content = false;
+
     while let Some(event) = stream.next().await {
         match event {
-            ProviderEvent::TextDelta(delta) => {
-                got_content = true;
-                write!(out, "{delta}")?;
-                out.flush()?;
-            }
-            ProviderEvent::ResponseEnd { message, .. } => {
-                if let Some(err) = &message.error_message {
-                    writeln!(out)?;
-                    bail!("provider error: {err}");
+            AgentEvent::MessageUpdate(update) => {
+                if let tau_types::AssistantMessageEvent::TextDelta(delta) =
+                    &update.assistant_message_event
+                {
+                    got_content = true;
+                    write!(out, "{}", delta.delta)?;
+                    out.flush()?;
                 }
             }
-            ProviderEvent::Error { message, .. } => {
+            AgentEvent::AgentEnd(_) => {
                 writeln!(out)?;
-                bail!("provider error: {message}");
             }
             _ => {}
         }
     }
-    writeln!(out)?;
+
     if !got_content {
         bail!("no content received from provider (possible rate limit or empty response)");
     }
@@ -427,37 +481,49 @@ async fn print_once_anthropic(
 }
 
 async fn print_once_openai(
-    provider: &OpenAIProvider,
+    provider: &OpenAIModelProvider,
     system: &str,
     prompt: &str,
+    model: &str,
+    cwd: &Path,
 ) -> anyhow::Result<()> {
-    let messages: Vec<AgentMessage> = vec![AgentMessage::User(UserMessage::new(prompt))];
-    let stream = provider.stream_response(system, &messages, &[]);
+    let tools = tau_coding::tools::create_coding_tools(cwd);
+
+    let harness = AgentHarness::new(AgentHarnessConfig {
+        provider: Arc::new(provider.clone()) as Arc<dyn ModelProvider + Send + Sync>,
+        model: model.to_string(),
+        system: system.to_string(),
+        tools,
+        max_turns: Some(20),
+        queue_mode: QueueMode::OneAtATime,
+        before_tool_call: None,
+        after_tool_call: None,
+    });
+
+    let stream = harness.prompt(prompt)?;
     futures::pin_mut!(stream);
     let stdout = io::stdout();
     let mut out = stdout.lock();
     let mut got_content = false;
+
     while let Some(event) = stream.next().await {
         match event {
-            ProviderEvent::TextDelta(delta) => {
-                got_content = true;
-                write!(out, "{delta}")?;
-                out.flush()?;
-            }
-            ProviderEvent::ResponseEnd { message, .. } => {
-                if let Some(err) = &message.error_message {
-                    writeln!(out)?;
-                    bail!("provider error: {err}");
+            AgentEvent::MessageUpdate(update) => {
+                if let tau_types::AssistantMessageEvent::TextDelta(delta) =
+                    &update.assistant_message_event
+                {
+                    got_content = true;
+                    write!(out, "{}", delta.delta)?;
+                    out.flush()?;
                 }
             }
-            ProviderEvent::Error { message, .. } => {
+            AgentEvent::AgentEnd(_) => {
                 writeln!(out)?;
-                bail!("provider error: {message}");
             }
             _ => {}
         }
     }
-    writeln!(out)?;
+
     if !got_content {
         bail!("no content received from provider (possible rate limit or empty response)");
     }

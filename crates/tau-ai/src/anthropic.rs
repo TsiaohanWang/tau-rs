@@ -57,6 +57,7 @@ impl Default for AnthropicConfig {
 }
 
 /// Anthropic Messages API provider.
+#[derive(Clone)]
 pub struct AnthropicProvider {
     config: AnthropicConfig,
     client: reqwest::Client,
@@ -78,7 +79,7 @@ impl AnthropicProvider {
         system: &str,
         messages: &[AgentMessage],
         tools: &[AgentTool],
-    ) -> impl futures::Stream<Item = ProviderEvent> + '_ {
+    ) -> impl futures::Stream<Item = ProviderEvent> + Send + 'static {
         let config = self.config.clone();
         let client = self.client.clone();
         let system = system.to_string();
@@ -494,9 +495,11 @@ mod tests {
 
     #[test]
     fn tool_builder_merges_arguments() {
-        let mut b = ToolCallBuilder::default();
-        b.id = "c1".into();
-        b.name = "bash".into();
+        let mut b = ToolCallBuilder {
+            id: "c1".into(),
+            name: "bash".into(),
+            ..Default::default()
+        };
         b.arguments_parts.push(r#"{"command":"#.into());
         b.arguments_parts.push(r#""ls"}"#.into());
         let tc = b.build(0);
@@ -522,5 +525,39 @@ mod tests {
         let v = anthropic_message(&msg);
         assert_eq!(v["role"], "user");
         assert_eq!(v["content"], "hello");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ModelProvider implementation
+// ---------------------------------------------------------------------------
+
+use crate::stream::canonicalize_provider_stream;
+use futures::stream::BoxStream;
+use tau_agent::provider::{ModelProvider, StreamRequest};
+use tau_types::AssistantMessageEvent;
+
+/// Wrapper that implements ModelProvider for AnthropicProvider.
+#[derive(Clone)]
+pub struct AnthropicModelProvider {
+    inner: AnthropicProvider,
+}
+
+impl AnthropicModelProvider {
+    pub fn new(provider: AnthropicProvider) -> Self {
+        Self { inner: provider }
+    }
+}
+
+impl ModelProvider for AnthropicModelProvider {
+    fn stream_response<'a>(
+        &'a self,
+        request: &'a StreamRequest<'a>,
+    ) -> BoxStream<'a, AssistantMessageEvent> {
+        let provider_stream =
+            self.inner
+                .stream_response(request.system, request.messages, request.tools);
+
+        Box::pin(canonicalize_provider_stream(provider_stream))
     }
 }

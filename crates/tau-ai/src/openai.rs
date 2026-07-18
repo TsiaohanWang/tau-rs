@@ -49,6 +49,7 @@ impl Default for OpenAIConfig {
 }
 
 /// OpenAI-compatible chat completions provider.
+#[derive(Clone)]
 pub struct OpenAIProvider {
     config: OpenAIConfig,
     client: reqwest::Client,
@@ -70,7 +71,7 @@ impl OpenAIProvider {
         system: &str,
         messages: &[AgentMessage],
         tools: &[AgentTool],
-    ) -> impl futures::Stream<Item = ProviderEvent> + '_ {
+    ) -> impl futures::Stream<Item = ProviderEvent> + Send + 'static {
         let config = self.config.clone();
         let client = self.client.clone();
         let system = system.to_string();
@@ -507,12 +508,48 @@ mod tests {
 
     #[test]
     fn tool_builder_merges_args() {
-        let mut b = ToolCallBuilder::default();
-        b.id = "c1".into();
-        b.name = "read".into();
+        let mut b = ToolCallBuilder {
+            id: "c1".into(),
+            name: "read".into(),
+            ..Default::default()
+        };
         b.arguments_parts.push(r#"{"file_p"#.into());
         b.arguments_parts.push(r#"ath":"/tmp/x"}"#.into());
         let tc = b.build(0);
         assert_eq!(tc.arguments["file_path"], "/tmp/x");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ModelProvider implementation
+// ---------------------------------------------------------------------------
+
+use crate::stream::canonicalize_provider_stream;
+use futures::stream::BoxStream;
+use tau_agent::provider::{ModelProvider, StreamRequest};
+use tau_types::AssistantMessageEvent;
+
+/// Wrapper that implements ModelProvider for OpenAIProvider.
+#[derive(Clone)]
+pub struct OpenAIModelProvider {
+    inner: OpenAIProvider,
+}
+
+impl OpenAIModelProvider {
+    pub fn new(provider: OpenAIProvider) -> Self {
+        Self { inner: provider }
+    }
+}
+
+impl ModelProvider for OpenAIModelProvider {
+    fn stream_response<'a>(
+        &'a self,
+        request: &'a StreamRequest<'a>,
+    ) -> BoxStream<'a, AssistantMessageEvent> {
+        let provider_stream =
+            self.inner
+                .stream_response(request.system, request.messages, request.tools);
+
+        Box::pin(canonicalize_provider_stream(provider_stream))
     }
 }

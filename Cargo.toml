@@ -4,6 +4,7 @@ members = [
     "crates/tau-types",
     "crates/tau-agent",
     "crates/tau-ai",
+    "crates/tau-coding",
     "crates/tau-cli",
 ]
 
@@ -23,7 +24,7 @@ futures = "0.3"
 async-stream = "0.3"
 async-trait = "0.1"
 tokio-util = "0.7"
-tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time", "fs", "process", "io-util"] }
 uuid = { version = "1", features = ["v4"] }
 
 [profile.dev]

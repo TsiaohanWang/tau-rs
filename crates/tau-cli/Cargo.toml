@@ -15,6 +15,7 @@ path = "src/main.rs"
 tau-types = { path = "../tau-types" }
 tau-agent = { path = "../tau-agent" }
 tau-ai = { path = "../tau-ai" }
+tau-coding = { path = "../tau-coding" }
 clap = { version = "4", features = ["derive"] }
 async-trait = "0.1"
 serde.workspace = true

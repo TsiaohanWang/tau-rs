@@ -61,17 +61,17 @@ mod tests {
     fn retry_delay_grows_exponentially() {
         // Base delay is 0.5, with small jitter
         let d0 = retry_delay_seconds(0, 30.0);
-        assert!(d0 >= 0.5 && d0 < 0.75, "d0={d0}");
+        assert!((0.5..0.75).contains(&d0), "d0={d0}");
         let d1 = retry_delay_seconds(1, 30.0);
-        assert!(d1 >= 1.0 && d1 < 1.25, "d1={d1}");
+        assert!((1.0..1.25).contains(&d1), "d1={d1}");
         let d2 = retry_delay_seconds(2, 30.0);
-        assert!(d2 >= 2.0 && d2 < 2.25, "d2={d2}");
+        assert!((2.0..2.25).contains(&d2), "d2={d2}");
     }
 
     #[test]
     fn retry_delay_caps_at_max() {
         let d = retry_delay_seconds(10, 5.0);
-        assert!(d >= 5.0 && d < 5.25, "d={d}");
+        assert!((5.0..5.25).contains(&d), "d={d}");
     }
 
     #[test]

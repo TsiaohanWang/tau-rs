@@ -1,0 +1,25 @@
+[package]
+name = "tau-coding"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+tau-types = { path = "../tau-types" }
+tau-agent = { path = "../tau-agent" }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+anyhow = "1"
+tempfile = "3"
+similar = "2"
+dirs = "5"
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
