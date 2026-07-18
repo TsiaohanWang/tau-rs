@@ -20,6 +20,9 @@ tempfile = "3"
 similar = "2"
 dirs = "5"
 libc = "0.2"
+sha2 = "0.10"
+serde = { workspace = true }
+toml = "0.8"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

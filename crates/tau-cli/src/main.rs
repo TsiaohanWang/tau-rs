@@ -149,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
             if cli.print {
                 let prompt = prompt_text.context("--print requires a prompt argument")?;
                 let cwd = std::env::current_dir().context("failed to get current directory")?;
-                match kind {
+                let model_provider: Arc<dyn ModelProvider + Send + Sync> = match kind {
                     config::ProviderKind::Anthropic => {
                         let cfg = AnthropicConfig {
                             api_key,
@@ -161,9 +161,7 @@ async fn main() -> anyhow::Result<()> {
                             ..Default::default()
                         };
                         let provider = AnthropicProvider::new(cfg);
-                        let model_provider = AnthropicModelProvider::new(provider);
-                        print_once_anthropic(&model_provider, &system, &prompt, &model, &cwd)
-                            .await?;
+                        Arc::new(AnthropicModelProvider::new(provider))
                     }
                     config::ProviderKind::OpenaiCompatible => {
                         let cfg = OpenAIConfig {
@@ -175,15 +173,16 @@ async fn main() -> anyhow::Result<()> {
                             ..Default::default()
                         };
                         let provider = OpenAIProvider::new(cfg);
-                        let model_provider = OpenAIModelProvider::new(provider);
-                        print_once_openai(&model_provider, &system, &prompt, &model, &cwd).await?;
+                        Arc::new(OpenAIModelProvider::new(provider))
                     }
-                }
+                };
+                print_once(model_provider, &system, &prompt, &model, &cwd, &home).await?;
             } else {
                 if prompt_text.is_some() {
                     bail!("interactive mode does not accept a prompt; use --print with a prompt");
                 }
-                match kind {
+                let cwd = std::env::current_dir().context("failed to get current directory")?;
+                let model_provider: Arc<dyn ModelProvider + Send + Sync> = match kind {
                     config::ProviderKind::Anthropic => {
                         let cfg = AnthropicConfig {
                             api_key,
@@ -195,9 +194,7 @@ async fn main() -> anyhow::Result<()> {
                             ..Default::default()
                         };
                         let provider = AnthropicProvider::new(cfg);
-                        let model_provider = AnthropicModelProvider::new(provider);
-                        eprintln!("tau-rs (anthropic) | type your message (Ctrl-D to exit)");
-                        run_repl_anthropic(&model_provider, &system, &model).await?;
+                        Arc::new(AnthropicModelProvider::new(provider))
                     }
                     config::ProviderKind::OpenaiCompatible => {
                         let cfg = OpenAIConfig {
@@ -209,11 +206,11 @@ async fn main() -> anyhow::Result<()> {
                             ..Default::default()
                         };
                         let provider = OpenAIProvider::new(cfg);
-                        let model_provider = OpenAIModelProvider::new(provider);
-                        eprintln!("tau-rs (openai) | type your message (Ctrl-D to exit)");
-                        run_repl_openai(&model_provider, &system, &model).await?;
+                        Arc::new(OpenAIModelProvider::new(provider))
                     }
-                }
+                };
+                eprintln!("tau-rs ({provider_name}) | type your message (Ctrl-D to exit)");
+                run_repl(model_provider, &system, &model, &cwd, &home).await?;
             }
         }
     }
@@ -289,24 +286,79 @@ fn cmd_config(
 }
 
 // ---------------------------------------------------------------------------
-// REPL — consumes raw ProviderEvent streams directly
+// Session persistence helpers
 // ---------------------------------------------------------------------------
 
-async fn run_repl_anthropic(
-    provider: &AnthropicModelProvider,
+/// Open (or create) a per-project session journal, append a `session_info`
+/// entry with the current cwd, and return the storage handle along with the
+/// session id.
+fn open_or_create_session(
+    home: &config::TauHome,
+    project_dir: &Path,
+) -> anyhow::Result<(String, tau_coding::session::JsonlSessionStorage)> {
+    let sessions_dir = home.root.join("sessions");
+    let mgr = tau_coding::session::SessionManager::new(sessions_dir);
+    let (path, storage) = mgr.create(project_dir)?;
+    let session_id = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    // Seed the journal with a session_info row so the file is non-empty and
+    // downstream tooling always sees the header first.
+    let info = tau_types::SessionEntry::SessionInfo(tau_types::SessionInfoEntry {
+        id: tau_types::message::new_entry_id(),
+        parent_id: None,
+        timestamp: tau_types::current_timestamp_secs(),
+        r#type: tau_types::EntryType::SessionInfo,
+        created_at: tau_types::current_timestamp_secs(),
+        cwd: project_dir.to_str().map(|s| s.to_string()),
+        title: None,
+    });
+    let rt = tokio::runtime::Handle::current();
+    rt.block_on(storage.append(&info))?;
+    Ok((session_id, storage))
+}
+
+/// Persist a single agent message as a `message` entry, then append a `leaf`
+/// entry pointing at it (matching the Python journal shape: each completed
+/// assistant/user turn is followed by a leaf row so the tree can be sketched).
+async fn persist_message(
+    storage: &tau_coding::session::JsonlSessionStorage,
+    message: tau_types::AgentMessage,
+) -> anyhow::Result<String> {
+    let id = tau_types::message::new_entry_id();
+    let entry = tau_types::SessionEntry::Message(Box::new(tau_types::MessageEntry {
+        id: id.clone(),
+        parent_id: None,
+        timestamp: tau_types::current_timestamp_secs(),
+        r#type: tau_types::EntryType::Message,
+        message,
+    }));
+    storage.append(&entry).await?;
+    storage
+        .append(&tau_types::SessionEntry::Leaf(tau_types::LeafEntry {
+            id: tau_types::message::new_entry_id(),
+            parent_id: None,
+            timestamp: tau_types::current_timestamp_secs(),
+            r#type: tau_types::EntryType::Leaf,
+            entry_id: Some(id.clone()),
+        }))
+        .await?;
+    Ok(id)
+}
+
+/// Build the shared `AgentHarness` used by both print and REPL modes.
+fn build_harness(
+    provider: Arc<dyn ModelProvider + Send + Sync>,
     system: &str,
     model: &str,
-) -> anyhow::Result<()> {
-    let stdin = io::stdin();
-    let mut reader = stdin.lock().lines();
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-
-    let cwd = std::env::current_dir().context("failed to get current directory")?;
-    let tools = tau_coding::tools::create_coding_tools(&cwd);
-
-    let harness = AgentHarness::new(AgentHarnessConfig {
-        provider: Arc::new(provider.clone()) as Arc<dyn ModelProvider + Send + Sync>,
+    cwd: &Path,
+) -> AgentHarness {
+    let tools = tau_coding::tools::create_coding_tools(cwd);
+    AgentHarness::new(AgentHarnessConfig {
+        provider,
         model: model.to_string(),
         system: system.to_string(),
         tools,
@@ -314,7 +366,32 @@ async fn run_repl_anthropic(
         queue_mode: QueueMode::OneAtATime,
         before_tool_call: None,
         after_tool_call: None,
-    });
+    })
+}
+
+// ---------------------------------------------------------------------------
+// REPL — interactive loop over AgentHarness + session persistence
+// ---------------------------------------------------------------------------
+
+async fn run_repl(
+    provider: Arc<dyn ModelProvider + Send + Sync>,
+    system: &str,
+    model: &str,
+    cwd: &Path,
+    home: &config::TauHome,
+) -> anyhow::Result<()> {
+    let stdin = io::stdin();
+    let mut reader = stdin.lock().lines();
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+
+    let harness = build_harness(provider, system, model, cwd);
+
+    let session = open_or_create_session(home, cwd)?;
+    let (_session_id, storage) = session;
+    if cli_verbose() {
+        writeln!(out, "session: {}", storage.path().display())?;
+    }
 
     loop {
         write!(out, "You: ")?;
@@ -336,7 +413,16 @@ async fn run_repl_anthropic(
         write!(out, "Assistant: ")?;
         out.flush()?;
 
-        let stream = harness.prompt(line)?;
+        // Persist the user's message before driving the loop so the journal
+        // ordering matches Python's (user, assistant, leaf).
+        let _ = persist_message(
+            &storage,
+            tau_types::AgentMessage::User(tau_types::UserMessage::new(line.as_str())),
+        )
+        .await;
+
+        let mut final_assistant: Option<tau_types::AgentMessage> = None;
+        let stream = harness.prompt(&line)?;
         futures::pin_mut!(stream);
         while let Some(event) = stream.next().await {
             match event {
@@ -348,72 +434,8 @@ async fn run_repl_anthropic(
                         out.flush()?;
                     }
                 }
-                AgentEvent::AgentEnd(_) => {
-                    writeln!(out)?;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    Ok(())
-}
-
-async fn run_repl_openai(
-    provider: &OpenAIModelProvider,
-    system: &str,
-    model: &str,
-) -> anyhow::Result<()> {
-    let stdin = io::stdin();
-    let mut reader = stdin.lock().lines();
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-
-    let cwd = std::env::current_dir().context("failed to get current directory")?;
-    let tools = tau_coding::tools::create_coding_tools(&cwd);
-
-    let harness = AgentHarness::new(AgentHarnessConfig {
-        provider: Arc::new(provider.clone()) as Arc<dyn ModelProvider + Send + Sync>,
-        model: model.to_string(),
-        system: system.to_string(),
-        tools,
-        max_turns: Some(20),
-        queue_mode: QueueMode::OneAtATime,
-        before_tool_call: None,
-        after_tool_call: None,
-    });
-
-    loop {
-        write!(out, "You: ")?;
-        out.flush()?;
-
-        let line = match reader.next() {
-            Some(Ok(l)) => l,
-            Some(Err(e)) => bail!("read error: {e}"),
-            None => {
-                writeln!(out)?;
-                break;
-            }
-        };
-
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        write!(out, "Assistant: ")?;
-        out.flush()?;
-
-        let stream = harness.prompt(line)?;
-        futures::pin_mut!(stream);
-        while let Some(event) = stream.next().await {
-            match event {
-                AgentEvent::MessageUpdate(update) => {
-                    if let tau_types::AssistantMessageEvent::TextDelta(delta) =
-                        &update.assistant_message_event
-                    {
-                        write!(out, "{}", delta.delta)?;
-                        out.flush()?;
-                    }
+                AgentEvent::MessageEnd(end) => {
+                    final_assistant = Some(end.message);
                 }
                 AgentEvent::AgentEnd(_) => {
                     writeln!(out)?;
@@ -421,40 +443,44 @@ async fn run_repl_openai(
                 _ => {}
             }
         }
+        if let Some(msg) = final_assistant {
+            let _ = persist_message(&storage, msg).await;
+        }
     }
 
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// --print mode — single-shot query, prints to stdout and exits
+// --print mode — single-shot query, prints to stdout and persists session
 // ---------------------------------------------------------------------------
 
-async fn print_once_anthropic(
-    provider: &AnthropicModelProvider,
+async fn print_once(
+    provider: Arc<dyn ModelProvider + Send + Sync>,
     system: &str,
     prompt: &str,
     model: &str,
     cwd: &Path,
+    home: &config::TauHome,
 ) -> anyhow::Result<()> {
-    let tools = tau_coding::tools::create_coding_tools(cwd);
+    let harness = build_harness(provider, system, model, cwd);
 
-    let harness = AgentHarness::new(AgentHarnessConfig {
-        provider: Arc::new(provider.clone()) as Arc<dyn ModelProvider + Send + Sync>,
-        model: model.to_string(),
-        system: system.to_string(),
-        tools,
-        max_turns: Some(20),
-        queue_mode: QueueMode::OneAtATime,
-        before_tool_call: None,
-        after_tool_call: None,
-    });
+    // Persistence failures should never break print mode — log and continue.
+    let session = open_or_create_session(home, cwd).ok();
+    if let Some((_, ref storage)) = session {
+        let _ = persist_message(
+            storage,
+            tau_types::AgentMessage::User(tau_types::UserMessage::new(prompt)),
+        )
+        .await;
+    }
 
     let stream = harness.prompt(prompt)?;
     futures::pin_mut!(stream);
     let stdout = io::stdout();
     let mut out = stdout.lock();
     let mut got_content = false;
+    let mut final_assistant: Option<tau_types::AgentMessage> = None;
 
     while let Some(event) = stream.next().await {
         match event {
@@ -467,10 +493,19 @@ async fn print_once_anthropic(
                     out.flush()?;
                 }
             }
+            AgentEvent::MessageEnd(end) => {
+                final_assistant = Some(end.message);
+            }
             AgentEvent::AgentEnd(_) => {
                 writeln!(out)?;
             }
             _ => {}
+        }
+    }
+
+    if let Some((_, storage)) = session {
+        if let Some(msg) = final_assistant {
+            let _ = persist_message(&storage, msg).await;
         }
     }
 
@@ -480,52 +515,8 @@ async fn print_once_anthropic(
     Ok(())
 }
 
-async fn print_once_openai(
-    provider: &OpenAIModelProvider,
-    system: &str,
-    prompt: &str,
-    model: &str,
-    cwd: &Path,
-) -> anyhow::Result<()> {
-    let tools = tau_coding::tools::create_coding_tools(cwd);
-
-    let harness = AgentHarness::new(AgentHarnessConfig {
-        provider: Arc::new(provider.clone()) as Arc<dyn ModelProvider + Send + Sync>,
-        model: model.to_string(),
-        system: system.to_string(),
-        tools,
-        max_turns: Some(20),
-        queue_mode: QueueMode::OneAtATime,
-        before_tool_call: None,
-        after_tool_call: None,
-    });
-
-    let stream = harness.prompt(prompt)?;
-    futures::pin_mut!(stream);
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    let mut got_content = false;
-
-    while let Some(event) = stream.next().await {
-        match event {
-            AgentEvent::MessageUpdate(update) => {
-                if let tau_types::AssistantMessageEvent::TextDelta(delta) =
-                    &update.assistant_message_event
-                {
-                    got_content = true;
-                    write!(out, "{}", delta.delta)?;
-                    out.flush()?;
-                }
-            }
-            AgentEvent::AgentEnd(_) => {
-                writeln!(out)?;
-            }
-            _ => {}
-        }
-    }
-
-    if !got_content {
-        bail!("no content received from provider (possible rate limit or empty response)");
-    }
-    Ok(())
+/// Globally inspect verbosity. Kept as a tiny helper so the REPL/print paths
+/// can surface session-path info without threading `cli` through call chains.
+fn cli_verbose() -> bool {
+    std::env::var("TAU_VERBOSE").is_ok()
 }

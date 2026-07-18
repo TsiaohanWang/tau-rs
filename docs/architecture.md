@@ -4,7 +4,7 @@
 
 本文件是 huggingface/tau（Python）到 Rust 重写的总体架构设计与全套迁移计划。它基于对原项目三个包（`tau_ai` ≈4.1k 行、`tau_agent` ≈1.7k 行、`tau_coding` ≈25.7k 行）全部核心源码的通读产出。
 
-> **当前状态**: Phase 1-3 已完成（2026-07-19）。Phase 3 工具+CLI 集成已完成；Phase 4 待实现（设计已完成）。
+> **当前状态**: Phase 1-4 已完成（2026-07-19）。内置工具、AgentHarness 集成、JSONL session 持久化与 catalog 深度合并均已落地；Phase 5 CodingSession 待实现。
 
 范围决策（已确认）：
 
@@ -425,9 +425,9 @@ reqwest 客户端（代理规整）、手写 SSE 行解析、retry/退避、`can
 `tau-coding` crate：`read`/`write`/`edit`/`bash` 四个核心工具（进程组 kill、路径锁、CRLF/BOM 保留），CLI 集成通过 `AgentHarness` 运行。
 验证：`tau-coding` 17 个单元测试全绿；CLI `--print` 模式通过 harness 执行工具调用。详见 `docs/phase-3.md`。
 
-## Phase 4 — 配置与持久化（设计已完成，待实现）
+## Phase 4 — 配置与持久化（✅ 已完成 2026-07-19）
 `JsonlSessionStorage`（session 文件读写）、`SessionManager`（session 目录管理）、catalog 深度合并、CLI 集成 session 持久化。
-验证：session 文件格式与 Python 兼容；catalog 合并结果与 Python 输出 diff 为空。详见 `docs/phase-4.md`。
+验证：19 新测试 + 104 workspace 全绿；session 文件格式与 Python 兼容；内置 catalog 通过 `include_str!` 嵌入，合并逻辑对齐 Python catalog loader。详见 `docs/phase-4.md`。
 
 ## Phase 5 — CodingSession + print 模式端到端 ★ 第一个用户可见里程碑
 CodingSession 完整组合（compaction 三触发、自动命名、中断修复、terminal `!`/`!!`）、命令注册表、`NoopExtensionRuntime`、三个 print 渲染器、CLI `-p` 模式。

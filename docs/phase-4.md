@@ -1,6 +1,6 @@
 # Phase 4 实施计划 — 配置与持久化
 
-> 状态：📋 计划中
+> 状态：✅ 已完成（2026-07-19）
 > 目标：实现 session 文件 I/O、session 目录管理、catalog 深度合并，为 Phase 5 CodingSession 奠定基础。
 
 ## 1. 范围
@@ -214,20 +214,91 @@ storage.append(&SessionEntry::Leaf(LeafEntry::default())).await?;
 
 ## 7. 验收
 
-- [ ] `cargo build --workspace` 零警告
-- [ ] `cargo test --workspace --features tau-agent/testing` 全绿
-- [ ] `tau-coding` session 模块单元测试通过
-- [ ] CLI print 模式自动创建 session 文件
-- [ ] Session 文件格式与 Python 兼容
-- [ ] `cargo fmt --check` 通过
+- [x] `cargo build --workspace` 零警告
+- [x] `cargo test --workspace --features tau-agent/testing` 全绿（104 测试）
+- [x] `tau-coding` session 模块单元测试通过（6 storage + 5 manager = 11 测试）
+- [x] `tau-coding` catalog 模块单元测试通过（8 测试）
+- [x] CLI print 模式自动创建 session 文件并持久化消息
+- [x] Session 文件格式与 Python 兼容（JSONL + v1 迁移）
+- [x] `cargo clippy --workspace --all-targets --features tau-agent/testing -- -D warnings` 通过
+- [x] `cargo fmt --check` 通过
 
 ---
 
 ## 8. 实施顺序
 
-1. 实现 `session/storage.rs` (JsonlSessionStorage)
-2. 实现 `session/manager.rs` (SessionManager)
-3. 实现 `config/catalog.rs` (catalog 合并)
-4. 重构 CLI 集成 session 持久化
-5. 全量测试
-6. 文档更新
+1. ~~实现 `session/storage.rs` (JsonlSessionStorage)~~ ✅
+2. ~~实现 `session/manager.rs` (SessionManager)~~ ✅
+3. ~~实现 `config/catalog.rs` (catalog 合并)~~ ✅
+4. ~~重构 CLI 集成 session 持久化~~ ✅
+5. ~~全量测试 + clippy + fmt~~ ✅
+6. ~~文档更新~~ ✅
+
+---
+
+## 9. 实施完成记录（2026-07-19）
+
+### 已完成文件
+
+| 文件 | 行数 | 内容 |
+|------|------|------|
+| `crates/tau-coding/src/session/mod.rs` | 6 | 模块导出 + re-export |
+| `crates/tau-coding/src/session/storage.rs` | ~180 | `JsonlSessionStorage`（read_all/append/append_batch + 6 测试） |
+| `crates/tau-coding/src/session/manager.rs` | ~240 | `SessionManager`（项目哈希、create/load/list、index.jsonl）+ 5 测试 |
+| `crates/tau-coding/src/config/mod.rs` | 10 | 模块导出 |
+| `crates/tau-coding/src/config/catalog.rs` | ~230 | `CatalogConfig`/`CatalogProvider`/`ProviderKind` + `merge_catalogs` + 内置 catalog 加载 + 8 测试 |
+| `crates/tau-coding/data/catalog.toml` | 6391 | 内置 provider catalog（从 Python 项目复制） |
+| `crates/tau-cli/src/main.rs` | 重构 | 统一 `print_once` / `run_repl` + session 持久化 |
+
+### Cargo.toml 变更
+
+`tau-coding` 新增依赖：
+- `sha2 = "0.10"` — 项目目录 SHA-256 哈希
+- `serde = { workspace = true }` — `SessionIndexEntry` 序列化
+- `toml = "0.8"` — 内置与用户 catalog 解析
+
+### 关键实现决策
+
+1. **JsonlSessionStorage**:
+   - `read_all` 使用 `tau_agent::session::jsonl::entry_from_json_line`（包含 v1 迁移）
+   - `append`/`append_batch` 通过 `tokio::fs::OpenOptions::append` 以追加模式写入
+   - 损坏行将 `SessionJsonlError{line_number}` 传播到 `SessionError::Jsonl`
+   - 文件不存在时 `read_all` 返回空 `Vec` 而非错误
+   - `append` 自动创建父目录（`tokio::fs::create_dir_all`）
+
+2. **SessionManager**:
+   - 项目哈希：`SHA-256(canonical_path)[..12]`（12 个 hex 字符）
+   - 目录布局：`~/.tau/sessions/<hash>/<session_id>.jsonl` + `index.jsonl`
+   - `create` 使用 `uuid::Uuid::new_v4().simple()` 生成 session id，向 `index.jsonl` 追加一行
+   - session 文件**懒创建**（首次 `append` 时才落盘）
+   - `list` 逐行扫描各 session 文件返回 entry 计数
+
+3. **Catalog 配置**:
+   - `tau-coding` 拥有自己的 `CatalogConfig`/`CatalogProvider` 类型（不依赖 `tau-cli`，避免环形依赖）
+   - 内置 catalog 通过 `include_str!("../../data/catalog.toml")` 嵌入（6391 行）
+   - `merge_catalogs`：overlay 的重名 provider **整体替换** base 中同 name 条目（对齐 Python catalog loader 的用户可见行为），保留各自独有条目；`schema_version` overlay 优先（0 时回退 base）
+   - `ProviderKind` 枚举：按 `kind` + `api` 派遣到 `Anthropic` / `OpenaiCompatible` / `OpenaiResponses`
+   - `load_user_or_default`：用户文件缺失时返回纯内置
+
+4. **CLI 集成**:
+   - 合并 4 个函数（`print_once_anthropic`、`print_once_openai`、`run_repl_anthropic`、`run_repl_openai`）为统一 `print_once` + `run_repl`
+   - 接收 `Arc<dyn ModelProvider + Send + Sync>`；在 main 中根据 provider kind 构造后转为 trait object
+   - `open_or_create_session`：使用 `SessionManager::create`，seed 一条 `SessionInfo` 行
+   - `persist_message`：追加 `MessageEntry` + `LeafEntry`（对齐 Python 的 journal 形状）
+   - print 模式下 session 持久化失败**不中断**主流程（log 后继续）
+   - REPL 下先持久化 user 消息，再驱动 `harness.prompt`；assistant 通过 `MessageEnd` 事件捕获并持久化
+   - `build_harness` 工厂函数消除重复配置代码
+
+### 测试统计
+
+| 测试套件 | Phase 3 | Phase 4 | 总计 |
+|----------|---------|---------|------|
+| tau-types 单元测试 | 4 | — | 4 |
+| tau-agent 单元测试 | 10 | — | 10 |
+| tau-agent 集成测试 | 11 | — | 11 |
+| tau-ai 单元测试 | 19 | — | 19 |
+| tau-ai 集成测试 | 10 | — | 10 |
+| tau-cli 单元测试 | 4 | — | 4 |
+| tau-cli 集成测试 | 10 | — | 10 |
+| **tau-coding 单元测试** | 17 | 19 | 36 |
+| **总计** | **85** | **19** | **104** |
