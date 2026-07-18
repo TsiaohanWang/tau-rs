@@ -1,115 +1,101 @@
 # Functional Gap Analysis: tau-rs vs Python tau
 
-Generated from line-by-line comparison of all agent source files.
+> 更新时间: 2026-07-18
+> 状态: Phase 1-3 已完成
 
-## Bug (must fix)
+## 已修复的问题
 
-### GAP-1: Duplicate `append_interrupted_tool_results` in `drive_stream`
+### GAP-1: Duplicate `append_interrupted_tool_results` in `drive_stream` — ✅ 已修复
 
-**Location:** `harness.rs:348` vs `harness.py:148,187`
+**原始位置:** `harness.rs:348` vs `harness.py:148,187`
 
-In Python, `_append_interrupted_tool_results()` is called exactly once before the loop starts (in `prompt_message`/`continue_`) and once in `_run`'s `finally` block only if cancelled.
+**问题**: `append_interrupted_tool_results` 被多次调用，可能导致重复的 synthetic entries。
 
-In Rust, `drive_stream` calls `append_interrupted_tool_results_on_vec(&mut messages)` at line 348 **after** `prompt_message` already called `self.append_interrupted_tool_results()` at line 316. This double-processes the messages unnecessarily.
-
-Worse: on cancellation, `MessagesGuard::drop` (line 128) calls `append_interrupted_tool_results_on_vec` a **third** time on the already-repaired messages, potentially creating duplicate synthetic entries.
-
-**Fix:** Remove the redundant call at `harness.rs:348`. The `prompt_message`/`continue_` entry points already handle the pre-loop repair. `MessagesGuard::drop` handles the post-cancellation repair.
+**修复**: `MessagesGuard::drop` 现在仅在取消时调用 `append_interrupted_tool_results_on_vec`（第133-134行），且第392行有注释明确说明此处不调用。
 
 ---
 
-## Functional Gaps
+## 当前设计决策（by design）
 
-### GAP-2: No async subscriber support
+### GAP-2: No async subscriber support — 设计决策
 
-**Location:** `harness.rs:94` vs `harness.py:192-196`
+**位置:** `harness.rs:94` vs `harness.py:192-196`
 
-Python `EventListener` is `Callable[[AgentEvent], Awaitable[None] | None]` — subscribers can be async functions. The `_notify` method checks with `isawaitable()` and `await`s if needed.
+**说明**: Python `EventListener` 支持 async 函数。Rust `listeners` 仅支持 sync closures。
 
-Rust `listeners` stores `Arc<dyn Fn(&AgentEvent) + Send + Sync>` — only sync closures. Async subscribers are not supported.
+**影响**: 如果前端或测试需要异步事件处理（如写入异步文件、调用异步 API），不能直接使用 subscriber 系统。
 
-**Impact:** If any frontend or test needs async event processing (e.g., writing to an async file, calling an async API), it cannot use the subscriber system directly.
+**状态**: 这是 Phase 2+ 的设计决策。可以通过让 listeners 返回 `BoxFuture` 并 spawn 来添加异步支持，或保持 sync-only 并记录约束。
 
-**Fix:** This is a design decision for Phase 2+. Async subscribers could be added by having listeners return a `BoxFuture` and spawning them, or by keeping sync-only and documenting the constraint.
-
----
-
-### GAP-3: No `accepting` guard in tool update collection
-
-**Location:** `agent_loop.rs:305-321` vs `loop.py:272-287`
-
-Python's `_run_tool` uses an `accepting` flag set to `False` in the `finally` block. The `on_update` callback checks `if accepting` before appending, preventing late-arriving updates after the tool executor returns.
-
-Rust's `run_tool` collects all `on_update` calls unconditionally. If a misbehaving executor calls the callback after returning `Ok`/`Err`, those stale updates would be emitted as `ToolExecutionUpdateEvent`s.
-
-**Impact:** Low in practice — well-behaved executors don't call back after returning. But it's a correctness gap vs Python's defensive design.
-
-**Fix:** Add an `Arc<AtomicBool>` accept flag, set it to `false` after the execute call returns, and check it in the update callback.
+**优先级**: 中（设计决策，非 bug）
 
 ---
 
-### GAP-4: Unconditional signal clearing in `MessagesGuard::drop`
+### GAP-3: No `accepting` guard in tool update collection — 低优先级
 
-**Location:** `harness.rs:140` vs `harness.py:188-189`
+**位置:** `agent_loop.rs:305-321` vs `loop.py:272-287`
 
-Python only clears `_current_signal` if it still belongs to the current invocation (`if self._current_signal is signal`). This prevents clobbering a newer run's signal.
+**说明**: Python 的 `_run_tool` 使用 `accepting` 标志，在 `finally` 块中设置为 `False`。`on_update` 回调检查 `if accepting` 后才追加，防止工具执行器返回后到达的 late-arriving updates。
 
-Rust unconditionally clears: `*self.state.signal.lock().unwrap() = None`. In practice this is safe because `start_run` uses `compare_exchange` to prevent concurrent runs. But it's a deviation from the Python defensive pattern.
+Rust 的 `run_tool` 无条件收集所有 `on_update` 调用。如果执行器在返回 `Ok`/`Err` 后调用回调，这些 stale updates 会被发出为 `ToolExecutionUpdateEvent`。
 
-**Impact:** None in practice (the compare_exchange guard prevents the race). But it's a deviation.
+**影响**: 实际影响低 — 良好行为的执行器不会在返回后调用回调。
 
-**Fix:** Store the `CancellationToken` in `MessagesGuard` and only clear if it matches. Low priority.
+**修复**: 添加 `Arc<AtomicBool>` accept 标志，在 execute 调用返回后设置为 `false`，并在 update 回调中检查。
 
----
-
-## Wire Compatibility (Serialization)
-
-### GAP-5: `details` field null handling diverges on edge case
-
-**Location:** `tool_result.rs:18` vs `tools.py:25`
-
-Python `AgentToolResult.details: JSONValue = None` with `exclude_none=True` — when `details` is `None`, the field is **omitted** from JSON.
-
-Rust `AgentToolResult.details: Value` with `skip_serializing_if = "Value::is_null"` — same: when `Value::Null`, the field is **omitted**.
-
-These match in the default case. The divergence only happens if a Rust consumer explicitly sets `details = Value::Null` (which gets skipped) vs Python where `details = None` (also skipped). **No actual gap** — both omit on null.
-
-### GAP-6: `ToolResultMessage.details` default differs
-
-**Location:** `message.rs:480` vs `messages.py:175`
-
-Python: `details: JSONValue = None` → serialized as omitted (via `exclude_none`).
-Rust: `details: Value` with `#[serde(default, skip_serializing_if = "Value::is_null")]` → `Value::Null` default, serialized as omitted.
-
-These match. **No gap.**
+**优先级**: 低
 
 ---
 
-## Missing Edge-Case Handling (Low Priority)
+### GAP-4: Unconditional signal clearing in `MessagesGuard::drop` — 安全偏差
 
-### GAP-7: `before_tool_call` not called for unknown tools in Rust
+**位置:** `harness.rs:140` vs `harness.py:188-189`
 
-**Location:** `agent_loop.rs:189-214` vs `loop.py:220-234`
+**说明**: Python 仅在 `_current_signal` 仍属于当前调用时清除（`if self._current_signal is signal`）。Rust 无条件清除。
 
-Python calls `before_tool_call` **before** checking if the tool exists. This allows the hook to block or intercept unknown tools.
+**影响**: 实际无影响（`compare_exchange` 保护防止并发运行）。但这是一个偏差。
 
-Rust calls `before_tool_call` first too (line 189-193), so this actually **matches**. ✅ No gap.
+**修复**: 在 `MessagesGuard` 中存储 `CancellationToken`，仅在匹配时清除。低优先级。
 
-### GAP-8: `after_tool_call` not called for blocked/cancelled/unknown-tool paths
-
-**Location:** `agent_loop.rs:194-221` vs `loop.py:246-247`
-
-Both Python and Rust call `after_tool_call` unconditionally after the result is determined (whether from `before_tool_call` block, cancellation, unknown tool, or actual execution). ✅ No gap.
+**优先级**: 无（安全偏差）
 
 ---
 
-## Summary
+## 已确认无差距的问题
 
-| ID | Severity | Description | Fix Complexity |
-|----|----------|-------------|----------------|
-| GAP-1 | **Bug** | Duplicate `append_interrupted_tool_results` in `drive_stream` | Trivial — delete one line |
-| GAP-2 | Medium | No async subscriber support | Design decision — defer to Phase 2 |
-| GAP-3 | Low | No `accepting` guard in tool update callback | Small — add AtomicBool flag |
-| GAP-4 | None | Unconditional signal clearing (safe due to compare_exchange) | Trivial — optional |
+### GAP-5: `details` field null handling — ✅ 无差距
 
-**GAP-1 is the only item requiring immediate action.** The rest are either design decisions, defensive improvements, or non-issues.
+**位置:** `tool_result.rs:18` vs `tools.py:25`
+
+Python 和 Rust 都在 `details` 为 `None`/`Null` 时省略该字段。
+
+### GAP-6: `ToolResultMessage.details` default — ✅ 无差距
+
+**位置:** `message.rs:480` vs `messages.py:175`
+
+Python 和 Rust 都使用 `None`/`Null` 默认值，并在序列化时省略。
+
+### GAP-7: `before_tool_call` not called for unknown tools — ✅ 无差距
+
+**位置:** `agent_loop.rs:189-214` vs `loop.py:220-234`
+
+Python 和 Rust 都在检查工具是否存在之前调用 `before_tool_call`。
+
+### GAP-8: `after_tool_call` not called for blocked/cancelled/unknown-tool paths — ✅ 无差距
+
+**位置:** `agent_loop.rs:194-221` vs `loop.py:246-247`
+
+Python 和 Rust 都在结果确定后无条件调用 `after_tool_call`。
+
+---
+
+## 总结
+
+| ID | 严重性 | 描述 | 状态 | 修复复杂度 |
+|----|--------|------|------|-----------|
+| GAP-1 | Bug | Duplicate `append_interrupted_tool_results` | ✅ 已修复 | — |
+| GAP-2 | Medium | No async subscriber support | ⚠️ 设计决策 | 设计决策 |
+| GAP-3 | Low | No `accepting` guard in tool update callback | ⚠️ 待修复 | 小 |
+| GAP-4 | None | Unconditional signal clearing | ⚠️ 安全偏差 | 可选 |
+
+**结论**: Phase 1-3 的所有 bug 级别问题已修复。剩余问题均为设计决策或低优先级改进。

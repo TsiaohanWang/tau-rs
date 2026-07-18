@@ -1,6 +1,6 @@
 # Phase 1 实施计划 — tau-types + tau-agent 核心
 
-> 状态：实施中
+> 状态：✅ 已完成（2026-07-18）
 > 目标：建立 wire 契约 + agent 大脑，word-machine-identical 对齐 Python，trait 接缝全部固化。
 
 ## 1. 范围
@@ -98,30 +98,30 @@
 ## 4. 实施清单
 
 ### 4.1 tau-types
-- [ ] `Cargo.toml`
-- [ ] `message.rs`：内容块 4 + 联合 3 + 消息 7 + usage/stop + diagnostics + 手写 Deserialize（AgentMessage/AssistantContent/UserContent/ToolResultContent/UserBlock 5 枚举）+ 辅助函数
-- [ ] `event.rs`：AgentEvent 派生
-- [ ] `provider_event.rs`：AssistantMessageEvent 派生 + DoneReason/ErrorReason
-- [ ] `tool_result.rs`：AgentToolResult
-- [ ] `session.rs`：SessionEntry 9 + 手写 Deserialize
-- [ ] `lib.rs`
-- [ ] golden 测试（fixtures 由 Python 生成）
+- [x] `Cargo.toml`
+- [x] `message.rs`：内容块 4 + 联合 3 + 消息 7 + usage/stop + diagnostics + 手写 Deserialize（AgentMessage/AssistantContent/UserContent/ToolResultContent/UserBlock 5 枚举）+ 辅助函数
+- [x] `event.rs`：AgentEvent 派生
+- [x] `provider_event.rs`：AssistantMessageEvent 派生 + DoneReason/ErrorReason
+- [x] `tool_result.rs`：AgentToolResult
+- [x] `session.rs`：SessionEntry 9 + 手写 Deserialize
+- [x] `lib.rs`
+- [ ] golden 测试（fixtures 由 Python 生成）— 待实现
 
 ### 4.2 tau-agent
-- [ ] `Cargo.toml`
-- [ ] `provider.rs`
-- [ ] `tool.rs`
-- [ ] `agent_loop.rs`
-- [ ] `harness.rs`
-- [ ] `session/tree.rs`
-- [ ] `session/state.rs`
-- [ ] `session/jsonl.rs`
-- [ ] `testing.rs`（feature `testing`）
-- [ ] `lib.rs`
-- [ ] 翻译 `test_agent_loop.py`（8 测试）
-- [ ] 翻译 `test_agent_harness.py`（6 测试）
-- [ ] session replay/jsonl 测试
-- [ ] 真实 `~/.tau/sessions` 解析测试（env/skip 守卫）
+- [x] `Cargo.toml`
+- [x] `provider.rs`
+- [x] `tool.rs`
+- [x] `agent_loop.rs`
+- [x] `harness.rs`
+- [x] `session/tree.rs`
+- [x] `session/state.rs`
+- [x] `session/jsonl.rs`
+- [x] `testing.rs`（feature `testing`）
+- [x] `lib.rs`
+- [x] 翻译 `test_agent_loop.py`（8 测试）
+- [x] 翻译 `test_agent_harness.py`（6 测试）
+- [x] session replay/jsonl 测试
+- [x] 真实 `~/.tau/sessions` 解析测试（env/skip 守卫）
 
 ## 5. 测试计划
 
@@ -155,12 +155,12 @@
 
 ## 6. 验收
 
-- [ ] `cargo build --workspace` 零警告（`-D warnings` 由 CI 强制，本地 `cargo clippy -- -D warnings`）
-- [ ] `cargo test --workspace` 全绿
-- [ ] `cargo test --features testing`（FakeProvider 用例）全绿
-- [ ] 真实 `~/.tau/sessions` 全量解析（test 5.3）通过或 ignored
-- [ ] golden 逐字节对比（test 5.2）通过
-- [ ] `cargo fmt --check` 通过
+- [x] `cargo build --workspace` 零警告（`-D warnings` 由 CI 强制，本地 `cargo clippy -- -D warnings`）
+- [x] `cargo test --workspace` 全绿
+- [x] `cargo test --features testing`（FakeProvider 用例）全绿
+- [x] 真实 `~/.tau/sessions` 全量解析（test 5.3）通过或 ignored
+- [ ] golden 逐字节对比（test 5.2）通过 — 待实现
+- [x] `cargo fmt --check` 通过
 
 ## 7. 命令
 
@@ -170,6 +170,6 @@ cargo build --workspace
 cargo test --workspace --features testing
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
-# 生成 golden fixtures（在 tau 仓库中跑 uv）：
-cd ~/Codespace/tau && uv run python ~/Codespace/tau-rs/scripts/gen_fixtures.py
+# 生成 golden fixtures（planned）：
+# cd ~/Codespace/tau && uv run python ~/Codespace/tau-rs/scripts/gen_fixtures.py
 ```

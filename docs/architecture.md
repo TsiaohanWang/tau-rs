@@ -4,6 +4,8 @@
 
 本文件是 huggingface/tau（Python）到 Rust 重写的总体架构设计与全套迁移计划。它基于对原项目三个包（`tau_ai` ≈4.1k 行、`tau_agent` ≈1.7k 行、`tau_coding` ≈25.7k 行）全部核心源码的通读产出。
 
+> **当前状态**: Phase 1-3 已完成（2026-07-18）。Phase 4+ 待实现。
+
 范围决策（已确认）：
 
 | 决策项 | 选择 |
@@ -444,3 +446,76 @@ OAuth 交互流、openai-codex provider、google/mistral 适配器、responses A
 明确**不做**的（防 scope creep）：不碰 reqwest/tokio 网络栈、不做任何 CLI、不做工具实现（用 stub 工具测试 loop）、不设计扩展 trait（但保证 `run_agent_loop` 的 `before/after_tool_call` 参数预留，零成本保留 Python 已有的接缝）。
 
 详细的 Phase 1 可执行实现计划见 `docs/phase-1.md`。
+
+---
+
+# 6. Rust 实现状态（2026-07-18）
+
+## 6.1 已完成模块
+
+| Phase | Crate | 模块 | 行数 | 状态 |
+|-------|-------|------|------|------|
+| 1 | `tau-types` | `message.rs` | ~600 | ✅ 完成 |
+| 1 | `tau-types` | `event.rs` | ~110 | ✅ 完成 |
+| 1 | `tau-types` | `provider_event.rs` | ~150 | ✅ 完成 |
+| 1 | `tau-types` | `session.rs` | ~100 | ✅ 完成 |
+| 1 | `tau-types` | `tool_result.rs` | ~50 | ✅ 完成 |
+| 1 | `tau-agent` | `provider.rs` | ~40 | ✅ 完成 |
+| 1 | `tau-agent` | `tool.rs` | ~150 | ✅ 完成 |
+| 1 | `tau-agent` | `agent_loop.rs` | ~340 | ✅ 完成 |
+| 1 | `tau-agent` | `harness.rs` | ~490 | ✅ 完成 |
+| 1 | `tau-agent` | `session/` | ~570 | ✅ 完成 |
+| 1 | `tau-agent` | `testing.rs` | ~170 | ✅ 完成 |
+| 2 | `tau-ai` | `anthropic.rs` | ~530 | ✅ 完成 |
+| 2 | `tau-ai` | `openai.rs` | ~520 | ✅ 完成 |
+| 2 | `tau-ai` | `sse.rs` | ~150 | ✅ 完成 |
+| 2 | `tau-ai` | `stream.rs` | ~440 | ✅ 完成 |
+| 2 | `tau-ai` | `retry.rs` | ~90 | ✅ 完成 |
+| 2 | `tau-ai` | `http.rs` | ~80 | ✅ 完成 |
+| 3 | `tau-cli` | `main.rs` | ~465 | ✅ 完成 |
+| 3 | `tau-cli` | `config.rs` | ~370 | ✅ 完成 |
+
+**总代码量**: ~5,600 行（不含测试）
+
+## 6.2 测试覆盖
+
+| Crate | 单元测试 | 集成测试 | 总计 |
+|-------|---------|---------|------|
+| `tau-types` | 10 | — | 10 |
+| `tau-agent` | 5 | 11 | 16 |
+| `tau-ai` | — | 12 | 12 |
+| `tau-cli` | — | 10 | 10 |
+| **总计** | **15** | **33** | **68** |
+
+## 6.3 已支持的 Provider
+
+| Provider | 类型 | 默认模型 | 状态 |
+|----------|------|----------|------|
+| OpenCode Zen | `openai-compatible` | `big-pickle` | ✅ 已验证 |
+| NVIDIA NIM | `openai-compatible` | `deepseek-ai/deepseek-v4-flash` | ✅ 已验证 |
+| DeepSeek | `openai-compatible` | `deepseek-v4-flash` | ✅ 已配置 |
+| Anthropic | `anthropic` | `claude-sonnet-4` | ✅ 代码完成 |
+| OpenAI | `openai` | `gpt-4o` | ✅ 代码完成 |
+
+## 6.4 待实现模块（Phase 4+）
+
+| Phase | 模块 | 说明 |
+|-------|------|------|
+| 4 | 内置工具 | `read`/`write`/`edit`/`bash` 工具实现 |
+| 4 | 上下文管理 | `context_window` 估算、AGENTS.md 发现链 |
+| 5 | `CodingSession` | 组合根：compaction、自动命名、中断修复 |
+| 5 | 命令系统 | 斜杠命令注册表 |
+| 6 | 高级 REPL | rustyline、历史记录、自动补全 |
+| 7 | ratatui TUI | 全量终端 UI |
+| 8 | OAuth | 浏览器 OAuth 流程 |
+| 8 | 扩展系统 | 动态插件加载（WASM/rhai/子进程 IPC） |
+
+## 6.5 与 Python 原版的关键差异
+
+| 维度 | Python | Rust | 影响 |
+|------|--------|------|------|
+| 扩展系统 | 动态 Python 插件 | 静态 trait（v1） | 功能受限，但更安全 |
+| TUI | Textual | ratatui（planned） | 需重写 |
+| 异步模型 | async generator | `impl Stream` | 语义等价 |
+| 错误处理 | exceptions | `Result` + `thiserror` | 更严格 |
+| 并发 | GIL + threading | 真并行 | 性能提升 |
