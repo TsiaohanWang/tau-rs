@@ -1,0 +1,26 @@
+[package]
+name = "tau-agent"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Exposes `FakeProvider` and pi-style event constructors for deterministic tests.
+testing = []
+
+[dependencies]
+tau-types = { path = "../tau-types" }
+futures = { workspace = true }
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+tokio-util = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+futures = { workspace = true }

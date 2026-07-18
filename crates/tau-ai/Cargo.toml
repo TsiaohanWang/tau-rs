@@ -1,0 +1,26 @@
+[package]
+name = "tau-ai"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+tau-types = { path = "../tau-types" }
+tau-agent = { path = "../tau-agent" }
+futures.workspace = true
+async-stream.workspace = true
+async-trait.workspace = true
+tokio-util.workspace = true
+tokio.workspace = true
+reqwest = { version = "0.12", features = ["stream", "json"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"
