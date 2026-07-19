@@ -56,12 +56,13 @@ pub trait ToolExecutor: Send + Sync {
 
 pub type ToolUpdateCallback = dyn Fn(AgentToolResult) + Send + Sync;
 
-/// Whether a tool's multiple calls may run concurrently. Reserved for future
-/// use; the loop currently runs tool calls sequentially (matching Python).
+/// Whether a tool's multiple calls may run concurrently. The agent loop does
+/// **not** yet honour parallel execution — all calls run sequentially
+/// (matching Python). `Parallel` is accepted but ignored for now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolExecutionMode {
-    #[default]
     Parallel,
+    #[default]
     Sequential,
 }
 

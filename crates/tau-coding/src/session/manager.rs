@@ -66,20 +66,20 @@ impl SessionManager {
     }
 
     /// Return the per-project directory, creating it if missing.
-    pub fn prepare(&self, project_dir: &Path) -> Result<PathBuf, SessionError> {
+    pub async fn prepare(&self, project_dir: &Path) -> Result<PathBuf, SessionError> {
         let hash = Self::project_hash(project_dir);
         let dir = self.sessions_dir.join(&hash);
-        std::fs::create_dir_all(&dir)?;
+        tokio::fs::create_dir_all(&dir).await?;
         Ok(dir)
     }
 
     /// Create a brand-new session: pick a uuid, build the storage, append an
     /// index row. Returns `(session_path, storage)`.
-    pub fn create(
+    pub async fn create(
         &self,
         project_dir: &Path,
     ) -> Result<(PathBuf, JsonlSessionStorage), SessionError> {
-        let dir = self.prepare(project_dir)?;
+        let dir = self.prepare(project_dir).await?;
         let session_id = uuid::Uuid::new_v4().simple().to_string();
         let session_path = dir.join(format!("{session_id}.jsonl"));
         let storage = JsonlSessionStorage::new(session_path.clone());
@@ -91,29 +91,32 @@ impl SessionManager {
             cwd: Some(project_dir.to_str().unwrap_or("").to_string()),
             title: None,
         };
-        self.append_to_index(project_dir, &index_entry)?;
+        self.append_to_index(project_dir, &index_entry).await?;
         Ok((session_path, storage))
     }
 
     /// Open storage for an already-existing session file.
-    pub fn load(
+    pub async fn load(
         &self,
         project_dir: &Path,
         session_id: &str,
     ) -> Result<JsonlSessionStorage, SessionError> {
-        let dir = self.prepare(project_dir)?;
+        let dir = self.prepare(project_dir).await?;
         let path = dir.join(format!("{session_id}.jsonl"));
         Ok(JsonlSessionStorage::new(path))
     }
 
     /// Read every row of `index.jsonl` for a project.
-    pub fn load_index(&self, project_dir: &Path) -> Result<Vec<SessionIndexEntry>, SessionError> {
-        let dir = self.prepare(project_dir)?;
+    pub async fn load_index(
+        &self,
+        project_dir: &Path,
+    ) -> Result<Vec<SessionIndexEntry>, SessionError> {
+        let dir = self.prepare(project_dir).await?;
         let index_path = dir.join("index.jsonl");
-        if !index_path.exists() {
+        if !tokio::fs::try_exists(&index_path).await? {
             return Ok(Vec::new());
         }
-        let text = std::fs::read_to_string(index_path)?;
+        let text = tokio::fs::read_to_string(index_path).await?;
         let mut out = Vec::new();
         for line in text.lines() {
             if line.trim().is_empty() {
@@ -131,33 +134,35 @@ impl SessionManager {
     }
 
     /// Append one row to `index.jsonl`.
-    pub fn append_to_index(
+    pub async fn append_to_index(
         &self,
         project_dir: &Path,
         entry: &SessionIndexEntry,
     ) -> Result<(), SessionError> {
-        let dir = self.prepare(project_dir)?;
+        let dir = self.prepare(project_dir).await?;
         let index_path = dir.join("index.jsonl");
         let mut line = serde_json::to_string(entry).expect("index entry serializes");
         line.push('\n');
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
+        use tokio::io::AsyncWriteExt;
+        let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(index_path)?;
-        file.write_all(line.as_bytes())?;
+            .open(index_path)
+            .await?;
+        file.write_all(line.as_bytes()).await?;
         Ok(())
     }
 
     /// List sessions for a project, counted entries each.
-    pub fn list(&self, project_dir: &Path) -> Result<Vec<SessionInfo>, SessionError> {
-        let dir = self.prepare(project_dir)?;
-        let index = self.load_index(project_dir)?;
+    pub async fn list(&self, project_dir: &Path) -> Result<Vec<SessionInfo>, SessionError> {
+        let dir = self.prepare(project_dir).await?;
+        let index = self.load_index(project_dir).await?;
         let mut out = Vec::with_capacity(index.len());
         for row in index {
             let path = dir.join(&row.session_path);
-            let count = if path.exists() {
-                std::fs::read_to_string(&path)?
+            let count = if tokio::fs::try_exists(&path).await? {
+                tokio::fs::read_to_string(&path)
+                    .await?
                     .lines()
                     .filter(|l| !l.trim().is_empty())
                     .count()
@@ -194,13 +199,13 @@ mod tests {
         assert_ne!(h1, h3);
     }
 
-    #[test]
-    fn create_writes_index_row_and_session_file() {
+    #[tokio::test]
+    async fn create_writes_index_row_and_session_file() {
         let root = tmp_root();
         let mgr = SessionManager::new(root.path().to_path_buf());
         let project = Path::new("/tmp/project");
 
-        let (path, storage) = mgr.create(project).unwrap();
+        let (path, storage) = mgr.create(project).await.unwrap();
         // The session file is not created until something is appended.
         assert!(
             !path.exists(),
@@ -208,7 +213,7 @@ mod tests {
         );
         assert_eq!(storage.path(), &path);
 
-        let index = mgr.load_index(project).unwrap();
+        let index = mgr.load_index(project).await.unwrap();
         assert_eq!(index.len(), 1);
         assert_eq!(
             index[0].session_id,
@@ -222,7 +227,7 @@ mod tests {
         let mgr = SessionManager::new(root.path().to_path_buf());
         let project = Path::new("/tmp/proj2");
 
-        let (path, storage) = mgr.create(project).unwrap();
+        let (path, storage) = mgr.create(project).await.unwrap();
         storage
             .append(&tau_types::SessionEntry::Leaf(tau_types::LeafEntry {
                 id: "l1".into(),
@@ -236,24 +241,23 @@ mod tests {
 
         let reloaded = mgr
             .load(project, path.file_stem().unwrap().to_str().unwrap())
+            .await
             .unwrap();
         let entries = reloaded.read_all().await.unwrap();
         assert_eq!(entries.len(), 1);
     }
 
-    #[test]
-    fn list_counts_entries_per_session() {
+    #[tokio::test]
+    async fn list_counts_entries_per_session() {
         let root = tmp_root();
         let mgr = SessionManager::new(root.path().to_path_buf());
         let project = Path::new("/tmp/proj3");
 
-        let (_p1, s1) = mgr.create(project).unwrap();
-        let (_p2, s2) = mgr.create(project).unwrap();
-        // s1 -> empty, s2 -> append two lines via storage (sync wrapper)
+        let (_p1, s1) = mgr.create(project).await.unwrap();
+        let (_p2, s2) = mgr.create(project).await.unwrap();
+        // s1 -> empty, s2 -> append two lines via storage
         {
-            use crate::session::storage::JsonlSessionStorage;
             let _ = s1;
-            // write two entries directly to s2
             let e1 = tau_types::SessionEntry::Leaf(tau_types::LeafEntry {
                 id: "a".into(),
                 parent_id: None,
@@ -268,22 +272,21 @@ mod tests {
                 r#type: tau_types::EntryType::Leaf,
                 entry_id: None,
             });
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(JsonlSessionStorage::append(&s2, &e1)).unwrap();
-            rt.block_on(JsonlSessionStorage::append(&s2, &e2)).unwrap();
+            s2.append(&e1).await.unwrap();
+            s2.append(&e2).await.unwrap();
         }
 
-        let infos = mgr.list(project).unwrap();
+        let infos = mgr.list(project).await.unwrap();
         assert_eq!(infos.len(), 2);
         let total: usize = infos.iter().map(|i| i.entry_count).sum();
         assert_eq!(total, 2);
     }
 
-    #[test]
-    fn load_index_missing_returns_empty() {
+    #[tokio::test]
+    async fn load_index_missing_returns_empty() {
         let root = tmp_root();
         let mgr = SessionManager::new(root.path().to_path_buf());
         let project = Path::new("/tmp/no-such");
-        assert!(mgr.load_index(project).unwrap().is_empty());
+        assert!(mgr.load_index(project).await.unwrap().is_empty());
     }
 }

@@ -39,7 +39,6 @@ impl ToolExecutor for WriteExecutor {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::new("Missing required argument: content"))?;
 
-        // Resolve path relative to cwd
         let file_path = if let Some(stripped) = path.strip_prefix('~') {
             let home = dirs::home_dir()
                 .ok_or_else(|| ToolError::new("Cannot determine home directory"))?;
@@ -50,17 +49,22 @@ impl ToolExecutor for WriteExecutor {
             self.cwd.join(path)
         };
 
-        // Create parent directories if they don't exist
         if let Some(parent) = file_path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|e| ToolError::new(format!("Failed to create directories: {}", e)))?;
         }
 
-        // Write file content
-        tokio::fs::write(&file_path, content)
-            .await
-            .map_err(|e| ToolError::new(format!("Failed to write file '{}': {}", path, e)))?;
+        // Atomic write: write to a tempfile in the same directory, then rename.
+        // rename(2) is atomic on POSIX when source and target are on the same
+        // filesystem, preventing corruption on crash/mid-write.
+        let dir = file_path.parent().unwrap_or(Path::new("."));
+        let mut tmp = tempfile::NamedTempFile::new_in(dir)
+            .map_err(|e| ToolError::new(format!("Failed to create tempfile: {e}")))?;
+        std::io::Write::write_all(&mut tmp, content.as_bytes())
+            .map_err(|e| ToolError::new(format!("Failed to write tempfile: {e}")))?;
+        tmp.persist(&file_path)
+            .map_err(|e| ToolError::new(format!("Failed to persist file '{}': {e}", path)))?;
 
         Ok(AgentToolResult::from_text(format!(
             "Successfully wrote {} bytes to '{}'",

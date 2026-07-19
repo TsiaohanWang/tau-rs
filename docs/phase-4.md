@@ -16,9 +16,10 @@
 - 不做 Anthropic token 自动刷新（Phase 8）
 - 不做 `settings.json`（Phase 7）
 - 不做 `tui.json`（Phase 7）
-- 不做 CodingSession 组合根（Phase 5）
-- 不做 compaction（Phase 5）
-- 不做 命令系统（Phase 5）
+- ~~不做 CodingSession 组合根（Phase 5）~~ — 骨架已实现（`session/coding_session.rs`）
+- ~~不做 compaction（Phase 5）~~ — 基础已实现（`session/compaction.rs` + `session/context_window.rs`）
+- ~~不做 命令系统（Phase 5）~~ — system prompt 组装器已实现（`session/prompt.rs`）
+- ~~不做 REPL 工具事件显示~~ — 已实现
 
 ---
 
@@ -33,8 +34,12 @@ crates/tau-coding/src/
 │   └── ...
 ├── session/
 │   ├── mod.rs
-│   ├── storage.rs   # JsonlSessionStorage
-│   └── manager.rs   # SessionManager
+│   ├── storage.rs           # JsonlSessionStorage
+│   ├── manager.rs           # SessionManager
+│   ├── coding_session.rs    # CodingSession 组合根骨架（Phase 5 预置）
+│   ├── compaction.rs         # Compaction 基础逻辑（Phase 5 预置）
+│   ├── context_window.rs    # 上下文窗口计算（Phase 5 预置）
+│   └── prompt.rs            # System prompt 组装器（Phase 5 预置）
 └── config/
     └── catalog.rs   # catalog 深度合并
 ```
@@ -215,7 +220,7 @@ storage.append(&SessionEntry::Leaf(LeafEntry::default())).await?;
 ## 7. 验收
 
 - [x] `cargo build --workspace` 零警告
-- [x] `cargo test --workspace --features tau-agent/testing` 全绿（104 测试）
+- [x] `cargo test --workspace --features tau-agent/testing` 全绿（130 测试）
 - [x] `tau-coding` session 模块单元测试通过（6 storage + 5 manager = 11 测试）
 - [x] `tau-coding` catalog 模块单元测试通过（8 测试）
 - [x] CLI print 模式自动创建 session 文件并持久化消息
@@ -300,5 +305,5 @@ storage.append(&SessionEntry::Leaf(LeafEntry::default())).await?;
 | tau-ai 集成测试 | 10 | — | 10 |
 | tau-cli 单元测试 | 4 | — | 4 |
 | tau-cli 集成测试 | 10 | — | 10 |
-| **tau-coding 单元测试** | 17 | 19 | 36 |
-| **总计** | **85** | **19** | **104** |
+| **tau-coding 单元测试** | 43 | 19 | 62 |
+| **总计** | **130** | **19** | **149** |

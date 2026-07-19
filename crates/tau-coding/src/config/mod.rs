@@ -8,4 +8,6 @@
 
 pub mod catalog;
 
-pub use catalog::{CatalogConfig, CatalogProvider, ProviderKind, merge_catalogs};
+pub use catalog::{
+    CatalogConfig, CatalogProvider, ProviderKind, builtin, load_user_or_default, merge_catalogs,
+};

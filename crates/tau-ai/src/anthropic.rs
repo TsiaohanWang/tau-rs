@@ -144,99 +144,112 @@ impl AnthropicProvider {
                         return;
                     }
                     Ok(resp) => {
-                        let text = resp.text().await.unwrap_or_default();
+                        use futures::StreamExt;
+                        let mut byte_stream = resp.bytes_stream();
+                        let mut accumulator = crate::sse::SseAccumulator::new();
                         let mut tool_builders: HashMap<u32, ToolCallBuilder> = HashMap::new();
                         let mut finish_reason: Option<String> = None;
                         let mut usage: Usage = Usage::default();
 
-                        for line in text.lines() {
-                            let event = match parse_sse_line(line) {
-                                Some(e) => e,
-                                None => continue,
+                        while let Some(chunk_result) = byte_stream.next().await {
+                            let bytes = match chunk_result {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    warn!(
+                                        provider = "anthropic",
+                                        error = %e,
+                                        "error reading SSE body chunk"
+                                    );
+                                    break;
+                                }
                             };
-                            let chunk: Value = match serde_json::from_str(&event) {
-                                Ok(v) => v,
-                                Err(_) => continue,
-                            };
-                            let event_type = chunk["type"].as_str().unwrap_or("");
+                            let text = String::from_utf8_lossy(&bytes);
+                            for line in text.split('\n') {
+                                let chunk: Value = match accumulator.feed(line) {
+                                    Some(crate::sse::SseEvent::Data(v)) => v,
+                                    Some(crate::sse::SseEvent::Done) => break,
+                                    None => continue,
+                                };
+                                let event_type = chunk["type"].as_str().unwrap_or("");
 
-                            match event_type {
-                                "message_start" => {
-                                    let msg = &chunk["message"];
-                                    usage = parse_usage(&msg["usage"]);
-                                    let model = msg["model"].as_str().unwrap_or(&config.model);
-                                    yield ProviderEvent::ResponseStart {
-                                        model: model.to_string(),
-                                    };
-                                }
-                                "content_block_start" => {
-                                    let block = &chunk["content_block"];
-                                    if block["type"].as_str() == Some("tool_use") {
-                                        let index = chunk["index"].as_u64().unwrap_or(0) as u32;
-                                        let builder = tool_builders
-                                            .entry(index)
-                                            .or_default();
-                                        builder.id = block["id"].as_str().unwrap_or("").to_string();
-                                        builder.name = block["name"].as_str().unwrap_or("").to_string();
+                                match event_type {
+                                    "message_start" => {
+                                        let msg = &chunk["message"];
+                                        usage = parse_usage(&msg["usage"]);
+                                        let model = msg["model"].as_str().unwrap_or(&config.model);
+                                        yield ProviderEvent::ResponseStart {
+                                            model: model.to_string(),
+                                        };
                                     }
-                                }
-                                "content_block_delta" => {
-                                    let delta = &chunk["delta"];
-                                    match delta["type"].as_str().unwrap_or("") {
-                                        "text_delta" => {
-                                            let text = delta["text"].as_str().unwrap_or("");
-                                            if !text.is_empty() {
-                                                yield ProviderEvent::TextDelta(text.to_string());
-                                            }
-                                        }
-                                        "thinking_delta" => {
-                                            let text = delta["thinking"].as_str().unwrap_or("");
-                                            if !text.is_empty() {
-                                                yield ProviderEvent::ThinkingDelta(text.to_string());
-                                            }
-                                        }
-                                        "input_json_delta" => {
+                                    "content_block_start" => {
+                                        let block = &chunk["content_block"];
+                                        if block["type"].as_str() == Some("tool_use") {
                                             let index = chunk["index"].as_u64().unwrap_or(0) as u32;
                                             let builder = tool_builders
                                                 .entry(index)
                                                 .or_default();
-                                            builder.arguments_parts.push(
-                                                delta["partial_json"].as_str().unwrap_or("").to_string(),
-                                            );
+                                            builder.id = block["id"].as_str().unwrap_or("").to_string();
+                                            builder.name = block["name"].as_str().unwrap_or("").to_string();
                                         }
-                                        _ => {}
                                     }
-                                }
-                                "message_delta" => {
-                                    let delta = &chunk["delta"];
-                                    if let Some(sr) = delta["stop_reason"].as_str() {
-                                        finish_reason = Some(sr.to_string());
+                                    "content_block_delta" => {
+                                        let delta = &chunk["delta"];
+                                        match delta["type"].as_str().unwrap_or("") {
+                                            "text_delta" => {
+                                                let text = delta["text"].as_str().unwrap_or("");
+                                                if !text.is_empty() {
+                                                    yield ProviderEvent::TextDelta(text.to_string());
+                                                }
+                                            }
+                                            "thinking_delta" => {
+                                                let text = delta["thinking"].as_str().unwrap_or("");
+                                                if !text.is_empty() {
+                                                    yield ProviderEvent::ThinkingDelta(text.to_string());
+                                                }
+                                            }
+                                            "input_json_delta" => {
+                                                let index = chunk["index"].as_u64().unwrap_or(0) as u32;
+                                                let builder = tool_builders
+                                                    .entry(index)
+                                                    .or_default();
+                                                builder.arguments_parts.push(
+                                                    delta["partial_json"].as_str().unwrap_or("").to_string(),
+                                                );
+                                            }
+                                            _ => {}
+                                        }
                                     }
-                                    let delta_usage = &chunk["usage"];
-                                    if let Some(tokens) = delta_usage["output_tokens"].as_i64() {
-                                        usage.output = tokens;
-                                    }
-                                    if let Some(details) =
-                                        delta_usage["output_tokens_details"].as_object()
-                                    {
-                                        if let Some(thinking) =
-                                            details.get("thinking_tokens").and_then(|v| v.as_i64())
+                                    "message_delta" => {
+                                        let delta = &chunk["delta"];
+                                        if let Some(sr) = delta["stop_reason"].as_str() {
+                                            finish_reason = Some(sr.to_string());
+                                        }
+                                        let delta_usage = &chunk["usage"];
+                                        if let Some(tokens) = delta_usage["output_tokens"].as_i64() {
+                                            usage.output = tokens;
+                                        }
+                                        if let Some(details) =
+                                            delta_usage["output_tokens_details"].as_object()
                                         {
-                                            usage.reasoning = Some(thinking);
+                                            if let Some(thinking) =
+                                                details.get("thinking_tokens").and_then(|v| v.as_i64())
+                                            {
+                                                usage.reasoning = Some(thinking);
+                                            }
                                         }
                                     }
+                                    "error" => {
+                                        let msg = chunk["error"]["message"]
+                                            .as_str()
+                                            .unwrap_or("Provider returned an error");
+                                        yield ProviderEvent::Error {
+                                            message: msg.to_string(),
+                                            data: Some(chunk),
+                                        };
+                                        return;
+                                    }
+                                    _ => {}
                                 }
-                                "error" => {
-                                    let msg = chunk["error"]["message"]
-                                        .as_str()
-                                        .unwrap_or("Provider returned an error");
-                                    yield ProviderEvent::Error {
-                                        message: msg.to_string(),
-                                        data: Some(chunk),
-                                    };
-                                    return;
-                                }
-                                _ => {}
                             }
                         }
 
@@ -288,18 +301,6 @@ impl AnthropicProvider {
             }
         }
     }
-}
-
-fn parse_sse_line(line: &str) -> Option<String> {
-    let line = line.trim();
-    if line.is_empty() || line.starts_with(':') {
-        return None;
-    }
-    let payload = line.strip_prefix("data:")?.trim();
-    if payload == "[DONE]" {
-        return None;
-    }
-    Some(payload.to_string())
 }
 
 fn parse_usage(raw: &Value) -> Usage {
@@ -483,15 +484,6 @@ impl ToolCallExt for ToolCall {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_sse_lines() {
-        assert!(parse_sse_line("").is_none());
-        assert!(parse_sse_line(": comment").is_none());
-        assert!(parse_sse_line("data: [DONE]").is_none());
-        let data = parse_sse_line(r#"data: {"type":"delta"}"#).unwrap();
-        assert!(data.contains("delta"));
-    }
 
     #[test]
     fn tool_builder_merges_arguments() {

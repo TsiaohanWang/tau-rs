@@ -23,6 +23,7 @@ libc = "0.2"
 sha2 = "0.10"
 serde = { workspace = true }
 toml = "0.8"
+futures.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -80,6 +80,7 @@ fn providers_lists_all_entries() {
 #[test]
 fn providers_empty_catalog() {
     let tmp = TempDir::new().unwrap();
+    // Empty user catalog — builtin providers are still visible via merge
     fs::write(tmp.path().join("catalog.toml"), "schema_version = 1\n").unwrap();
 
     tau_cmd()
@@ -87,7 +88,8 @@ fn providers_empty_catalog() {
         .env("TAU_HOME", tmp.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains("no providers configured"));
+        .stdout(predicate::str::contains("openai"))
+        .stdout(predicate::str::contains("anthropic"));
 }
 
 // ---------------------------------------------------------------------------
@@ -217,12 +219,12 @@ fn handles_missing_providers_json() {
 #[test]
 fn handles_missing_catalog_toml() {
     let tmp = TempDir::new().unwrap();
-    // No catalog.toml
+    // No catalog.toml — builtin catalog is loaded via load_user_or_default
 
     tau_cmd()
         .arg("providers")
         .env("TAU_HOME", tmp.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains("no providers configured"));
+        .stdout(predicate::str::contains("openai"));
 }

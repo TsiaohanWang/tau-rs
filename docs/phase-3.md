@@ -333,8 +333,8 @@ while let Some(event) = stream.next().await {
 ## 6. 验收
 
 - [x] `cargo build --workspace` 零警告
-- [x] `cargo test --workspace --features tau-agent/testing` 全绿（85 测试）
-- [x] `tau-coding` 单元测试通过（17 测试）
+- [x] `cargo test --workspace --features tau-agent/testing` 全绿（130 测试）
+- [x] `tau-coding` 单元测试通过（43 测试）
 - [x] CLI `--print` 模式通过 harness 集成
 - [x] `cargo clippy --workspace --all-targets --features tau-agent/testing -- -D warnings` 通过
 - [x] `cargo fmt --check` 通过
@@ -348,7 +348,7 @@ while let Some(event) = stream.next().await {
 | `crates/tau-coding/Cargo.toml` | crate 配置（依赖 tau-types, tau-agent, tokio, tempfile, similar, dirs, libc） |
 | `crates/tau-coding/src/lib.rs` | 模块导出（tools, session, config） |
 | `crates/tau-coding/src/tools/mod.rs` | `create_coding_tools()` 工厂函数 |
-| `crates/tau-coding/src/tools/read.rs` | ReadExecutor + create_tool（17 测试） |
+| `crates/tau-coding/src/tools/read.rs` | ReadExecutor + create_tool（20 测试） |
 | `crates/tau-coding/src/tools/write.rs` | WriteExecutor + create_tool |
 | `crates/tau-coding/src/tools/edit.rs` | EditExecutor + create_tool |
 | `crates/tau-coding/src/tools/bash.rs` | BashExecutor + create_tool（process_group + libc::killpg） |
@@ -380,8 +380,8 @@ while let Some(event) = stream.next().await {
 | tau-ai 集成测试 | 10 |
 | tau-cli 单元测试 | 4 |
 | tau-cli 集成测试 | 10 |
-| **tau-coding 单元测试** | **17** |
-| **总计** | **85** |
+| **tau-coding 单元测试** | **43** |
+| **总计** | **130** |
 
 ---
 

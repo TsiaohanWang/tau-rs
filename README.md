@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-104%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-130%20passing-brightgreen)](#testing)
 
 ---
 
@@ -107,7 +107,7 @@ HTTP layer implementing the actual API communication.
 | Module | Contents |
 |---|---|
 | `anthropic` | `AnthropicProvider` — Anthropic Messages API (`/v1/messages`), SSE streaming with `message_start`→`content_block_delta`→`message_stop` lifecycle |
-| `openai` | `OpenAIProvider` — OpenAI Chat Completions API (`/chat/completions`), works with any OpenAI-compatible endpoint (OpenAI, Azure, vLLM, Ollama, NVIDIA NIM, OpenCode Zen, etc.) |
+| `openai` | `OpenAIProvider` — OpenAI Chat Completions API (`/chat/completions`), works with any OpenAI-compatible endpoint (OpenAI, Azure, vLLM, Ollama, NVIDIA NIM, OpenCode, etc.) |
 | `sse` | Hand-written SSE line parser — extracts `data:` payloads from streaming HTTP responses |
 | `stream` | `canonicalize_provider_stream()` — normalizes raw provider events into Pi-compatible `AssistantMessageEvent`s |
 | `retry` | Exponential backoff with jitter — retries on 408/429/5xx, network errors, and SSE-wrapped errors |
@@ -133,14 +133,20 @@ The coding-specific layer that wires `tau-agent` + `tau-ai` into a usable coding
 
 | Module | Contents |
 |---|---|
-| `tools` | `create_coding_tools()` — built-in tools: `read` (read file, optional offset/limit), `write` (truncate/overwrite), `edit` (string-replace with occurrence control), `bash` (shell command w/ optional timeout). Each implements `tau_agent::tool::AgentTool` |
-| `session/storage` | `JsonlSessionStorage` — atomic read/append over JSONL session files (tolerant of blank lines, surfaces malformed-line errors with line number, applies v1 migration on read) |
-| `session/manager` | `SessionManager` — per-project directory hashing (`SHA-256(path)[..12]`), `create`/`load`/`list`, `index.jsonl` append |
+| `tools` | `create_coding_tools()` — built-in tools: `read` (read file, optional offset/limit), `write` (atomic write via tempfile+rename), `edit` (similar diff + LF/BOM normalization), `bash` (shell command w/ optional timeout). Each implements `tau_agent::tool::AgentTool` |
+| `session/storage` | `JsonlSessionStorage` — atomic read/append over JSONL session files (tokio::sync::Mutex for concurrent safety, v1 migration on read) |
+| `session/manager` | `SessionManager` — async per-project directory hashing, create/load/list, index.jsonl append |
+| `session/coding_session` | `CodingSession` — composition root: owns persistence, harness, system-prompt assembly, context-window estimation, and compaction |
+| `session/context_window` | `estimate_context_usage()` — chars/4 token heuristic, `needs_compaction()` threshold check |
+| `session/compaction` | `plan_compaction()` + `create_compaction_entry()` — plan which messages to compact and create compaction entries |
 | `config/catalog` | `CatalogConfig`/`CatalogProvider`/`ProviderKind`, `merge_catalogs()` (overlay-replaces-base on provider name), built-in catalog embedded via `include_str!` |
+| `prompt` | `build_system_prompt()` — assembles tool descriptions and guidelines into the system prompt |
 
 **Phase 3 scope**: built-in `read`/`write`/`edit`/`bash` tools (no context-window / AGENTS.md / skills in v1 — deferred).
 
 **Phase 4 scope**: `JsonlSessionStorage` + `SessionManager` (session persistence) and `merge_catalogs` (catalog merge) integrated into the CLI — print and REPL modes now persist `SessionInfo` + `MessageEntry` + `LeafEntry` rows per turn.
+
+**Architecture audit (15 fixes)**: CatalogConfig deduplication, SSE true streaming, CodingSession skeleton, file locking, atomic writes, similar-based edit diffs, context-window estimation, compaction basics, tool event display, async SessionManager, system prompt assembler, and more.
 
 ---
 
@@ -164,25 +170,25 @@ cargo build --workspace
 Create `~/.tau/credentials.json`:
 ```json
 {
-  "opencode-zen": "sk-your-api-key-here"
+  "opencode": "sk-your-api-key-here"
 }
 ```
 
 Or use environment variables (loaded from `.env` or shell):
 ```bash
-export OPENCODE_ZEN_API_KEY=sk-your-api-key-here
+export OPENCODE_API_KEY=sk-your-api-key-here
 ```
 
 ### Run
 
 **Single-shot print mode** (non-interactive):
 ```bash
-cargo run -p tau-cli -- --print -P opencode-zen "Explain the difference between TCP and UDP"
+cargo run -p tau-cli -- --print -P opencode "Explain the difference between TCP and UDP"
 ```
 
 **Interactive REPL**:
 ```bash
-cargo run -p tau-cli -- -P opencode-zen
+cargo run -p tau-cli -- -P opencode
 ```
 
 **List available providers**:
@@ -192,7 +198,7 @@ cargo run -p tau-cli -- providers
 
 **Show provider configuration**:
 ```bash
-cargo run -p tau-cli -- config opencode-zen
+cargo run -p tau-cli -- config opencode
 ```
 
 ---
@@ -209,13 +215,13 @@ Provider catalog — defines available providers, their endpoints, and supported
 schema_version = 1
 
 [[providers]]
-name = "opencode-zen"
-display_name = "OpenCode Zen"
+name = "opencode"
+display_name = "OpenCode"
 kind = "openai-compatible"
 base_url = "https://opencode.ai/zen/v1"
-api_key_env = "OPENCODE_ZEN_API_KEY"
-models = ["big-pickle", "deepseek-v4-flash-free", "glm-4.7-free"]
-default_model = "big-pickle"
+api_key_env = "OPENCODE_API_KEY"
+models = ["deepseek-v4-flash-free", "mimo-v2.5-free", "nemotron-3-ultra-free", "north-mini-code-free"]
+default_model = "deepseek-v4-flash-free"
 
 [[providers]]
 name = "nvidia-nim"
@@ -233,10 +239,10 @@ Per-provider preferences (default model, retries, timeout):
 
 ```json
 {
-  "default_provider": "opencode-zen",
+  "default_provider": "opencode",
   "provider_preferences": {
-    "opencode-zen": {
-      "default_model": "big-pickle",
+    "opencode": {
+      "default_model": "deepseek-v4-flash-free",
       "max_retries": 3,
       "timeout_seconds": 60
     }
@@ -250,7 +256,7 @@ API keys (permissions: `0600`):
 
 ```json
 {
-  "opencode-zen": "sk-your-api-key",
+  "opencode": "sk-your-api-key",
   "nvidia-nim": "nvapi-your-api-key"
 }
 ```
@@ -268,7 +274,7 @@ API keys (permissions: `0600`):
 
 | Provider | Kind | Default Model | Notes |
 |---|---|---|---|
-| **OpenCode Zen** | `openai-compatible` | `big-pickle` | Free tier available; also supports `deepseek-v4-flash-free`, `glm-4.7-free`, `minimax-m2.1-free` |
+| **OpenCode** | `openai-compatible` | `deepseek-v4-flash-free` | Free tier only (4 models) |
 | **NVIDIA NIM** | `openai-compatible` | `deepseek-ai/deepseek-v4-flash` | Free tier with rate limits |
 | **DeepSeek** | `openai-compatible` | `deepseek-v4-flash` | Official DeepSeek API |
 | **OpenAI** | `openai` | `gpt-4o` | Official OpenAI API |
@@ -285,7 +291,7 @@ tau-rs [OPTIONS] [PROMPT]
 
 OPTIONS:
   -p, --print              Print response and exit (non-interactive)
-  -P, --provider <NAME>    Provider name (e.g., opencode-zen, nvidia-nim)
+  -P, --provider <NAME>    Provider name (e.g., opencode, nvidia-nim)
   -m, --model <MODEL>      Model override
   -S, --system <SYSTEM>    System prompt
   -M, --max-tokens <N>     Maximum tokens for response
@@ -310,7 +316,7 @@ tau -p -P nvidia-nim -m deepseek-ai/deepseek-v4-pro "Explain quantum computing"
 tau -p -S "You are a Rust expert" "Write a safe concurrent queue"
 
 # Verbose logging (for debugging)
-tau -v -p -P opencode-zen "Hello"
+tau -v -p -P opencode "Hello"
 ```
 
 ---
@@ -356,12 +362,13 @@ crates/
 │   │   ├── test_anthropic.rs  # 6 wiremock tests
 │   │   └── test_openai.rs     # 6 wiremock tests
 │   └── Cargo.toml
-├── tau-coding/                # Phase 3+4: tools + session storage + catalog
+├── tau-coding/                # Phase 3+4: tools + session storage + catalog + coding session
 │   ├── src/
 │   │   ├── lib.rs
 │   │   ├── tools/             # read / write / edit / bash + factory
-│   │   ├── session/           # storage.rs (JsonlSessionStorage), manager.rs (SessionManager)
-│   │   └── config/catalog.rs  # merge_catalogs + embedded built-in catalog
+│   │   ├── session/           # storage, manager, coding_session, context_window, compaction
+│   │   ├── config/catalog.rs  # merge_catalogs + embedded built-in catalog
+│   │   └── prompt.rs          # system prompt assembler
 │   ├── data/
 │   │   └── catalog.toml       # Built-in provider catalog (embedded via include_str!)
 │   └── Cargo.toml
@@ -399,16 +406,16 @@ cargo fmt --check
 
 ### Testing Strategy
 
-The test suite includes **104 tests** across unit, integration, and wiremock levels:
+The test suite includes **130 tests** across unit, integration, and wiremock levels:
 
 | Crate | Unit Tests | Integration Tests | Total |
 |---|---|---|---|
 | `tau-types` | 10 | — | 10 |
 | `tau-agent` | 5 | 11 (loop + harness) | 16 |
-| `tau-ai` | — | 12 (wiremock HTTP mocks) | 12 |
-| `tau-coding` | 36 (17 tools + 12 session + 8 catalog) | — | 36 |
-| `tau-cli` | — | 10 (subprocess CLI tests) | 10 |
-| **Total** | **51** | **33** | **104** |
+| `tau-ai` | — | 10 (wiremock HTTP mocks) | 10 |
+| `tau-coding` | 57 (tools + session + catalog + context_window + compaction + prompt) | — | 57 |
+| `tau-cli` | 3 | 10 (subprocess CLI tests) | 13 |
+| **Total** | **75** | **21** | **130** |
 
 **Integration test patterns**:
 - `tau-ai` tests use [wiremock](https://github.com/LukeMathWalker/wiremock-rs) to mock HTTP responses and verify SSE parsing + retry behavior
@@ -459,7 +466,7 @@ tau-rs is designed to be **fully compatible** with existing `~/.tau/` data from 
 | Phase 2 | ✅ Done | `tau-ai` (Anthropic + OpenAI providers, SSE, retry, HTTP) |
 | Phase 3 | ✅ Done | Built-in tools (read/write/edit/bash) + `tau-cli` harness integration (print mode, REPL, config) |
 | Phase 4 | ✅ Done | Session persistence (`JsonlSessionStorage` + `SessionManager`) and catalog merge (`merge_catalogs` + embedded built-in catalog) integrated into CLI |
-| Phase 5 | 🔲 Planned | `CodingSession` composition root, compaction, commands |
+| Phase 5 | 🔲 Planned | `CodingSession` composition root skeleton ✅, compaction basics ✅, commands (remaining) |
 | Phase 6 | 🔲 Planned | Advanced REPL (rustyline, history, autocomplete) |
 | Phase 7 | 🔲 Planned | ratatui TUI |
 | Phase 8 | 🔲 Planned | OAuth, additional providers, session export |
@@ -471,7 +478,7 @@ tau-rs is designed to be **fully compatible** with existing `~/.tau/` data from 
 | Variable | Description | Default |
 |---|---|---|
 | `TAU_HOME` | Override `~/.tau/` directory | `~/.tau` |
-| `OPENCODE_ZEN_API_KEY` | OpenCode Zen API key | — |
+| `OPENCODE_API_KEY` | OpenCode API key | — |
 | `NVIDIA_NIM_API_KEY` | NVIDIA NIM API key | — |
 | `DEEPSEEK_API_KEY` | DeepSeek API key | — |
 | `OPENAI_API_KEY` | OpenAI API key | — |
@@ -490,4 +497,4 @@ MIT — see [LICENSE](LICENSE).
 ## Acknowledgments
 
 - [huggingface/tau](https://github.com/huggingface/tau) — the original Python implementation
-- [OpenCode](https://opencode.ai) — OpenCode Zen provider for free model access
+- [OpenCode](https://opencode.ai) — OpenCode provider for free model access

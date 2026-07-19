@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use tracing::debug;
 
+pub use tau_coding::config::CatalogConfig;
+
 /// Top-level configuration directory (~/.tau).
 #[derive(Debug, Clone)]
 pub struct TauHome {
@@ -109,71 +111,6 @@ impl CredentialsConfig {
 }
 
 // ---------------------------------------------------------------------------
-// catalog.toml
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
-pub struct CatalogConfig {
-    #[serde(default)]
-    pub schema_version: u32,
-    #[serde(default)]
-    pub providers: Vec<CatalogProvider>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
-pub struct CatalogProvider {
-    pub name: String,
-    #[serde(default)]
-    pub display_name: Option<String>,
-    #[serde(default)]
-    pub kind: Option<String>,
-    #[serde(default)]
-    pub base_url: Option<String>,
-    #[serde(default)]
-    pub api_key_env: Option<String>,
-    #[serde(default)]
-    pub credential_name: Option<String>,
-    #[serde(default)]
-    pub models: Vec<String>,
-    #[serde(default)]
-    pub default_model: Option<String>,
-    #[serde(default)]
-    pub docs_url: Option<String>,
-    #[serde(default)]
-    pub thinking_levels: Option<Vec<String>>,
-    #[serde(default)]
-    pub thinking_models: Option<Vec<String>>,
-    #[serde(default)]
-    pub thinking_default: Option<String>,
-    #[serde(default)]
-    pub thinking_parameter: Option<String>,
-    #[serde(default)]
-    pub context_windows: Option<HashMap<String, u64>>,
-}
-
-impl CatalogConfig {
-    pub fn load(path: &Path) -> anyhow::Result<Self> {
-        if !path.exists() {
-            debug!("no catalog.toml found");
-            return Ok(CatalogConfig {
-                schema_version: 1,
-                providers: vec![],
-            });
-        }
-        let text = std::fs::read_to_string(path)?;
-        let config: Self = toml::from_str(&text)?;
-        debug!(providers = config.providers.len(), "loaded catalog.toml");
-        Ok(config)
-    }
-
-    pub fn find_provider(&self, name: &str) -> Option<&CatalogProvider> {
-        self.providers.iter().find(|p| p.name == name)
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Credential resolution
 // ---------------------------------------------------------------------------
 
@@ -185,7 +122,7 @@ pub fn resolve_api_key(
     credentials: &CredentialsConfig,
     provider_name: &str,
 ) -> Option<String> {
-    if let Some(cp) = catalog.find_provider(provider_name) {
+    if let Some(cp) = catalog.providers.iter().find(|p| p.name == provider_name) {
         // 1. Environment variable
         if let Some(env_name) = &cp.api_key_env {
             if let Ok(val) = std::env::var(env_name) {
@@ -214,38 +151,11 @@ pub fn resolve_api_key(
     None
 }
 
-// ---------------------------------------------------------------------------
-// Provider kind detection
-// ---------------------------------------------------------------------------
-
-/// Determine if a provider should use the Anthropic or OpenAI wire protocol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProviderKind {
-    Anthropic,
-    OpenaiCompatible,
-}
-
-impl ProviderKind {
-    pub fn from_catalog(catalog: &CatalogConfig, provider_name: &str) -> Self {
-        if let Some(cp) = catalog.find_provider(provider_name) {
-            match cp.kind.as_deref() {
-                Some("anthropic") => ProviderKind::Anthropic,
-                _ => ProviderKind::OpenaiCompatible,
-            }
-        } else {
-            // Fallback: well-known names
-            match provider_name {
-                "anthropic" => ProviderKind::Anthropic,
-                _ => ProviderKind::OpenaiCompatible,
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+    use tau_coding::config::load_user_or_default;
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -278,38 +188,6 @@ mod tests {
     }
 
     #[test]
-    fn load_catalog_toml() {
-        let dir = tmp_dir();
-        let path = dir.join("catalog.toml");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(
-            f,
-            r#"schema_version = 1
-
-[[providers]]
-name = "deepseek"
-kind = "openai-compatible"
-base_url = "https://api.deepseek.com"
-api_key_env = "DEEPSEEK_API_KEY"
-credential_name = "deepseek"
-models = ["deepseek-v4-flash"]
-default_model = "deepseek-v4-flash"
-"#
-        )
-        .unwrap();
-
-        let cfg = CatalogConfig::load(&path).unwrap();
-        assert_eq!(cfg.schema_version, 1);
-        assert_eq!(cfg.providers.len(), 1);
-        let p = &cfg.providers[0];
-        assert_eq!(p.name, "deepseek");
-        assert_eq!(p.base_url.as_deref(), Some("https://api.deepseek.com"));
-        assert_eq!(p.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn resolve_api_key_from_env() {
         let dir = tmp_dir();
         let cat_path = dir.join("catalog.toml");
@@ -322,7 +200,7 @@ api_key_env = "TAU_TEST_KEY"
 "#
         )
         .unwrap();
-        let catalog = CatalogConfig::load(&cat_path).unwrap();
+        let catalog = load_user_or_default(&cat_path).unwrap();
         let creds = CredentialsConfig::default();
 
         // SAFETY: test runs single-threaded by default
@@ -351,7 +229,7 @@ credential_name = "mycred"
 "#
         )
         .unwrap();
-        let catalog = CatalogConfig::load(&cat_path).unwrap();
+        let catalog = load_user_or_default(&cat_path).unwrap();
 
         let cred_path = dir.join("credentials.json");
         let mut f2 = std::fs::File::create(&cred_path).unwrap();

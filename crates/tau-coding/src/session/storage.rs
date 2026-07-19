@@ -17,16 +17,26 @@ pub enum SessionError {
 
     #[error("JSONL error: {0}")]
     Jsonl(#[from] SessionJsonlError),
+
+    #[error("Harness error: {0}")]
+    Harness(#[from] tau_agent::harness::HarnessError),
 }
 
 /// Read-append storage for one session's JSONL journal.
+///
+/// Concurrent appends are serialized via an in-process `tokio::sync::Mutex`.
+/// Cross-process locking is not yet supported (single-writer semantics).
 pub struct JsonlSessionStorage {
     path: PathBuf,
+    write_lock: tokio::sync::Mutex<()>,
 }
 
 impl JsonlSessionStorage {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            write_lock: tokio::sync::Mutex::new(()),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -54,8 +64,10 @@ impl JsonlSessionStorage {
     }
 
     /// Append a single entry as one JSONL line. Creates the file if missing.
+    /// Serialized via an in-process mutex to prevent interleaved writes.
     pub async fn append(&self, entry: &SessionEntry) -> Result<(), SessionError> {
         let line = entry_to_json_line(entry);
+        let _guard = self.write_lock.lock().await;
         append_line(&self.path, &line).await
     }
 
@@ -68,6 +80,7 @@ impl JsonlSessionStorage {
         for e in entries {
             buf.push_str(&entry_to_json_line(e));
         }
+        let _guard = self.write_lock.lock().await;
         append_line(&self.path, buf.trim_end_matches('\n')).await?;
         Ok(())
     }

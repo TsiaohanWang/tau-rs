@@ -4,7 +4,7 @@
 
 本文件是 huggingface/tau（Python）到 Rust 重写的总体架构设计与全套迁移计划。它基于对原项目三个包（`tau_ai` ≈4.1k 行、`tau_agent` ≈1.7k 行、`tau_coding` ≈25.7k 行）全部核心源码的通读产出。
 
-> **当前状态**: Phase 1-4 已完成（2026-07-19）。内置工具、AgentHarness 集成、JSONL session 持久化与 catalog 深度合并均已落地；Phase 5 CodingSession 待实现。
+> **当前状态**: Phase 1-4 已完成（2026-07-19）。内置工具、AgentHarness 集成、JSONL session 持久化与 catalog 深度合并均已落地；Phase 5 CodingSession 骨架已实现（context-window 估算、compaction 基础、system prompt 组装器、REPL 工具事件显示已落地）。
 
 范围决策（已确认）：
 
@@ -427,10 +427,10 @@ reqwest 客户端（代理规整）、手写 SSE 行解析、retry/退避、`can
 
 ## Phase 4 — 配置与持久化（✅ 已完成 2026-07-19）
 `JsonlSessionStorage`（session 文件读写）、`SessionManager`（session 目录管理）、catalog 深度合并、CLI 集成 session 持久化。
-验证：19 新测试 + 104 workspace 全绿；session 文件格式与 Python 兼容；内置 catalog 通过 `include_str!` 嵌入，合并逻辑对齐 Python catalog loader。详见 `docs/phase-4.md`。
+验证：storage 4 + manager 4 + catalog 3 = 11 新测试，workspace 全部 130 测试全绿；session 文件格式与 Python 兼容；内置 catalog 通过 `include_str!` 嵌入，合并逻辑对齐 Python catalog loader。详见 `docs/phase-4.md`。
 
 ## Phase 5 — CodingSession + print 模式端到端 ★ 第一个用户可见里程碑
-CodingSession 完整组合（compaction 三触发、自动命名、中断修复、terminal `!`/`!!`）、命令注册表、`NoopExtensionRuntime`、三个 print 渲染器、CLI `-p` 模式。
+CodingSession 骨架已落地：context-window token 估算、compaction 基础逻辑、system prompt 组装器（`prompt.rs`）、`coding_session.rs` 组合根骨架。待完成：compaction 三触发完整实现、自动命名、中断修复、terminal `!`/`!!`、命令注册表、三个 print 渲染器、CLI `-p` 模式。
 验证：`tau-rs -p "..."` 跑通并落盘 session；同一 session 文件可被 Python `tau` resume（双向兼容终极验证）。
 
 ## Phase 6 — 简洁交互 REPL
@@ -466,7 +466,7 @@ OAuth 交互流、openai-codex provider、google/mistral 适配器、responses A
 
 ---
 
-# 6. Rust 实现状态（2026-07-18）
+# 6. Rust 实现状态（2026-07-19）
 
 ## 6.1 已完成模块
 
@@ -492,7 +492,7 @@ OAuth 交互流、openai-codex provider、google/mistral 适配器、responses A
 | 3 | `tau-cli` | `main.rs` | ~465 | ✅ 完成 |
 | 3 | `tau-cli` | `config.rs` | ~370 | ✅ 完成 |
 
-## 6.2 待实现模块（设计已完成）
+## 6.3 已实现模块（测试完成）
 
 | Phase | Crate | 模块 | 说明 | 状态 |
 |-------|-------|------|------|------|
@@ -501,54 +501,55 @@ OAuth 交互流、openai-codex provider、google/mistral 适配器、responses A
 | 3 | `tau-coding` | `tools/write.rs` | write 工具 | ✅ 已完成 |
 | 3 | `tau-coding` | `tools/edit.rs` | edit 工具 | ✅ 已完成 |
 | 3 | `tau-coding` | `tools/bash.rs` | bash 工具 | ✅ 已完成 |
-| 4 | `tau-coding` | `session/storage.rs` | `JsonlSessionStorage`：session 文件读写 | 📋 设计完成 |
-| 4 | `tau-coding` | `session/manager.rs` | `SessionManager`：session 目录管理 | 📋 设计完成 |
-| 4 | `tau-coding` | `config/catalog.rs` | catalog 深度合并 | 📋 设计完成 |
-| 5 | `tau-coding` | `coding_session.rs` | 组合根：compaction、自动命名、中断修复 | ⏳ 待设计 |
+| 4 | `tau-coding` | `session/storage.rs` | `JsonlSessionStorage`：session 文件读写 | ✅ 已完成 |
+| 4 | `tau-coding` | `session/manager.rs` | `SessionManager`：session 目录管理 | ✅ 已完成 |
+| 4 | `tau-coding` | `config/catalog.rs` | catalog 深度合并 | ✅ 已完成 |
+| 5 | `tau-coding` | `session/coding_session.rs` | 组合根骨架：context-window 估算、compaction 基础、system prompt 组装 | 🚧 骨架已实现 |
+| 5 | `tau-coding` | `session/compaction.rs` | compaction 基础逻辑 | 🚧 骨架已实现 |
+| 5 | `tau-coding` | `session/context_window.rs` | context-window token 估算 | 🚧 骨架已实现 |
+| 5 | `tau-coding` | `prompt.rs` | system prompt 组装器 | 🚧 骨架已实现 |
 | 5 | `tau-coding` | `commands/` | 斜杠命令注册表 | ⏳ 待设计 |
 | 6 | `tau-cli` | `repl/` | rustyline、历史记录、自动补全 | ⏳ 待设计 |
 | 7 | `tau-cli` | `tui/` | ratatui 全量终端 UI | ⏳ 待设计 |
 
-## 6.3 测试覆盖
+## 6.4 测试覆盖
 
 | Crate | 单元测试 | 集成测试 | 总计 |
 |-------|---------|---------|------|
 | `tau-types` | 4 | — | 4 |
 | `tau-agent` | 10 | 11 | 21 |
-| `tau-ai` | 19 | 10 | 29 |
-| `tau-cli` | 4 | 10 | 14 |
-| `tau-coding` | 17 | — | 17 |
-| **总计** | **54** | **31** | **85** |
+| `tau-ai` | 18 | 10 | 28 |
+| `tau-cli` | 3 | 10 | 13 |
+| `tau-coding` | 64 | — | 64 |
+| **总计** | **99** | **31** | **130** |
 
-### 待实现测试（Phase 4）
+### 待实现测试（Phase 4 → 已完成）
 
-| Phase | 模块 | 测试类型 | 数量 |
-|-------|------|----------|------|
-| 4 | `session/storage.rs` | 单元测试 | 4 |
-| 4 | `session/manager.rs` | 单元测试 | 4 |
-| 4 | `config/catalog.rs` | 单元测试 | 3 |
-| **待实现总计** | | | **11** |
+Phase 4 测试已全部落地（storage 4 + manager 4 + catalog 3 = 11 测试，已含于 `tau-coding` 64 单元测试中）。
 
-## 6.4 已支持的 Provider
+## 6.5 已支持的 Provider
 
 | Provider | 类型 | 默认模型 | 状态 |
 |----------|------|----------|------|
-| OpenCode Zen | `openai-compatible` | `big-pickle` | ✅ 已验证 |
+| OpenCode | `openai-compatible` | `deepseek-v4-flash-free` | ✅ 已验证 |
 | NVIDIA NIM | `openai-compatible` | `deepseek-ai/deepseek-v4-flash` | ✅ 已验证 |
 | DeepSeek | `openai-compatible` | `deepseek-v4-flash` | ✅ 已配置 |
 | Anthropic | `anthropic` | `claude-sonnet-4` | ✅ 代码完成 |
 | OpenAI | `openai` | `gpt-4o` | ✅ 代码完成 |
 
-## 6.4 待实现模块（Phase 3/4+）
+## 6.6 待实现模块（Phase 5+）
 
 | Phase | 模块 | 说明 | 状态 |
 |-------|------|------|------|
 | 3 | `tau-coding` crate | 新建 crate，包含工具和 session 模块 | ✅ 已完成 |
 | 3 | `tools/` | `read`/`write`/`edit`/`bash` 四个核心工具 | ✅ 已完成 |
-| 4 | `session/storage.rs` | `JsonlSessionStorage`：session 文件读写 | 📋 设计完成 |
-| 4 | `session/manager.rs` | `SessionManager`：session 目录管理 | 📋 设计完成 |
-| 4 | `config/catalog.rs` | catalog 深度合并 | 📋 设计完成 |
-| 5 | `CodingSession` | 组合根：compaction、自动命名、中断修复 | ⏳ 待设计 |
+| 4 | `session/storage.rs` | `JsonlSessionStorage`：session 文件读写 | ✅ 已完成 |
+| 4 | `session/manager.rs` | `SessionManager`：session 目录管理 | ✅ 已完成 |
+| 4 | `config/catalog.rs` | catalog 深度合并 | ✅ 已完成 |
+| 5 | `session/coding_session.rs` | 组合根骨架：context-window、compaction、system prompt | 🚧 骨架已实现 |
+| 5 | `session/compaction.rs` | compaction 基础逻辑 | 🚧 骨架已实现 |
+| 5 | `session/context_window.rs` | context-window token 估算 | 🚧 骨架已实现 |
+| 5 | `prompt.rs` | system prompt 组装器 | 🚧 骨架已实现 |
 | 5 | 命令系统 | 斜杠命令注册表 | ⏳ 待设计 |
 | 6 | 高级 REPL | rustyline、历史记录、自动补全 | ⏳ 待设计 |
 | 7 | ratatui TUI | 全量终端 UI | ⏳ 待设计 |

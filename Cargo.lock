@@ -1606,6 +1606,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "dirs 5.0.1",
+ "futures",
  "libc",
  "serde",
  "serde_json",

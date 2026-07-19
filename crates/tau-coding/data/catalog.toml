@@ -6291,39 +6291,18 @@ thinking_parameter = "reasoning_effort"
 
 [[providers]]
 name = "opencode"
-display_name = "OpenCode Zen"
+display_name = "OpenCode"
 kind = "openai-compatible"
 base_url = "https://opencode.ai/zen/v1"
 api_key_env = "OPENCODE_API_KEY"
 credential_name = "opencode"
-models = ["big-pickle", "deepseek-v4-flash", "deepseek-v4-flash-free", "deepseek-v4-pro", "glm-5", "glm-5.1", "glm-5.2", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.5-pro", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "grok-4.5", "grok-build-0.1", "kimi-k2.5", "kimi-k2.6", "kimi-k2.7-code", "mimo-v2.5-free", "minimax-m2.5", "minimax-m2.7", "minimax-m3", "nemotron-3-ultra-free", "north-mini-code-free", "qwen3.5-plus", "qwen3.6-plus"]
-default_model = "kimi-k2.7-code"
+models = ["deepseek-v4-flash-free", "mimo-v2.5-free", "nemotron-3-ultra-free", "north-mini-code-free"]
+default_model = "deepseek-v4-flash-free"
 docs_url = "https://opencode.ai/docs/zen"
 api = "openai-completions"
 thinking_levels = ["off", "minimal", "low", "medium", "high", "xhigh"]
 thinking_default = "medium"
 thinking_parameter = "reasoning_effort"
-
-[providers.model_metadata."gpt-5.4"]
-api = "openai-responses"
-
-[providers.model_metadata."gpt-5.4-mini"]
-api = "openai-responses"
-
-[providers.model_metadata."gpt-5.5"]
-api = "openai-responses"
-
-[providers.model_metadata."gpt-5.5-pro"]
-api = "openai-responses"
-
-[providers.model_metadata."gpt-5.6-luna"]
-api = "openai-responses"
-
-[providers.model_metadata."gpt-5.6-sol"]
-api = "openai-responses"
-
-[providers.model_metadata."gpt-5.6-terra"]
-api = "openai-responses"
 
 [[providers]]
 name = "github-copilot"

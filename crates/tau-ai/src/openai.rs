@@ -135,6 +135,7 @@ impl OpenAIProvider {
                         return;
                     }
                     Ok(resp) => {
+                        use futures::StreamExt;
                         let status = resp.status().as_u16();
                         let content_length = resp
                             .headers()
@@ -142,38 +143,70 @@ impl OpenAIProvider {
                             .and_then(|v| v.to_str().ok())
                             .unwrap_or("unknown")
                             .to_string();
-                        let text = resp.text().await.unwrap_or_default();
-                        if text.is_empty() {
-                            if attempt < config.max_retries {
-                                let delay =
-                                    retry_delay_seconds(attempt, config.max_retry_delay_seconds);
+                        let mut byte_stream = resp.bytes_stream();
+                        let mut line_buf = String::new();
+
+                        // Read first chunk — if empty, retry (matches old behavior)
+                        let first_chunk = byte_stream.next().await;
+                        let first_bytes = match first_chunk {
+                            Some(Ok(b)) => b,
+                            Some(Err(e)) => {
+                                if attempt < config.max_retries {
+                                    let delay = retry_delay_seconds(attempt, config.max_retry_delay_seconds);
+                                    warn!(
+                                        provider = config.provider_name,
+                                        error = %e,
+                                        attempt,
+                                        max = config.max_retries,
+                                        delay_secs = delay,
+                                        "network error reading SSE body, retrying"
+                                    );
+                                    attempt += 1;
+                                    if !wait_for_retry(delay, None).await {
+                                        return;
+                                    }
+                                    continue;
+                                }
+                                yield ProviderEvent::Error {
+                                    message: e.to_string(),
+                                    data: None,
+                                };
+                                return;
+                            }
+                            None => {
+                                if attempt < config.max_retries {
+                                    let delay =
+                                        retry_delay_seconds(attempt, config.max_retry_delay_seconds);
+                                    warn!(
+                                        provider = config.provider_name,
+                                        status,
+                                        content_length,
+                                        attempt,
+                                        max = config.max_retries,
+                                        delay_secs = delay,
+                                        "empty response body, retrying"
+                                    );
+                                    attempt += 1;
+                                    if !wait_for_retry(delay, None).await {
+                                        return;
+                                    }
+                                    continue;
+                                }
                                 warn!(
                                     provider = config.provider_name,
                                     status,
                                     content_length,
-                                    attempt,
-                                    max = config.max_retries,
-                                    delay_secs = delay,
-                                    "empty response body, retrying"
+                                    "empty response body after all retries"
                                 );
-                                attempt += 1;
-                                if !wait_for_retry(delay, None).await {
-                                    return;
-                                }
-                                continue;
+                                yield ProviderEvent::Error {
+                                    message: format!("HTTP {status}: empty response body"),
+                                    data: None,
+                                };
+                                return;
                             }
-                            warn!(
-                                provider = config.provider_name,
-                                status,
-                                content_length,
-                                "empty response body after all retries"
-                            );
-                            yield ProviderEvent::Error {
-                                message: format!("HTTP {status}: empty response body"),
-                                data: None,
-                            };
-                            return;
-                        }
+                        };
+                        line_buf.push_str(&String::from_utf8_lossy(&first_bytes));
+
                         let mut tool_builders: HashMap<u32, ToolCallBuilder> = HashMap::new();
                         let mut finish_reason: Option<String> = None;
                         let mut started = false;
@@ -181,9 +214,11 @@ impl OpenAIProvider {
                         let mut content_chunks: u32 = 0;
                         let mut sse_error: Option<String> = None;
 
-                        for line in text.lines() {
+                        // Process the first chunk's complete lines
+                        while let Some(pos) = line_buf.find('\n') {
+                            let line = line_buf[..pos].to_string();
+                            line_buf = line_buf[pos + 1..].to_string();
                             let line = line.trim();
-                            // OpenAI sends "data: {...}" lines
                             let payload = match line.strip_prefix("data:") {
                                 Some(rest) => rest.trim(),
                                 None => continue,
@@ -197,7 +232,6 @@ impl OpenAIProvider {
                             };
                             lines_processed += 1;
 
-                            // Detect SSE-wrapped error (e.g. NVIDIA NIM 200 + error body)
                             if let Some(err) = chunk.get("error") {
                                 let msg = err["message"]
                                     .as_str()
@@ -211,7 +245,6 @@ impl OpenAIProvider {
                                 Some(c) if !c.is_empty() => &c[0],
                                 _ => continue,
                             };
-
                             let delta = &choices["delta"];
 
                             if !started {
@@ -222,28 +255,21 @@ impl OpenAIProvider {
                                 };
                             }
 
-                            // Text content
                             if let Some(text_content) = delta["content"].as_str() {
                                 if !text_content.is_empty() {
                                     content_chunks += 1;
                                     yield ProviderEvent::TextDelta(text_content.to_string());
                                 }
                             }
-
-                            // Reasoning/thinking content (OpenAI o1-style)
                             if let Some(reasoning) = delta["reasoning_content"].as_str() {
                                 if !reasoning.is_empty() {
                                     yield ProviderEvent::ThinkingDelta(reasoning.to_string());
                                 }
                             }
-
-                            // Tool calls
                             if let Some(tc_deltas) = delta["tool_calls"].as_array() {
                                 for tc_delta in tc_deltas {
                                     let index = tc_delta["index"].as_u64().unwrap_or(0) as u32;
-                                    let builder = tool_builders
-                                        .entry(index)
-                                        .or_default();
+                                    let builder = tool_builders.entry(index).or_default();
                                     if let Some(id) = tc_delta["id"].as_str() {
                                         builder.id = id.to_string();
                                     }
@@ -255,12 +281,103 @@ impl OpenAIProvider {
                                     }
                                 }
                             }
-
-                            // Finish reason
                             if let Some(fr) = choices["finish_reason"].as_str() {
                                 if !fr.is_empty() {
                                     finish_reason = Some(fr.to_string());
                                 }
+                            }
+                        }
+
+                        // Process remaining chunks
+                        while let Some(chunk_result) = byte_stream.next().await {
+                            let bytes = match chunk_result {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    warn!(
+                                        provider = config.provider_name,
+                                        error = %e,
+                                        "error reading SSE body chunk"
+                                    );
+                                    break;
+                                }
+                            };
+                            line_buf.push_str(&String::from_utf8_lossy(&bytes));
+
+                            while let Some(pos) = line_buf.find('\n') {
+                                let line = line_buf[..pos].to_string();
+                                line_buf = line_buf[pos + 1..].to_string();
+                                let line = line.trim();
+                                let payload = match line.strip_prefix("data:") {
+                                    Some(rest) => rest.trim(),
+                                    None => continue,
+                                };
+                                if payload == "[DONE]" {
+                                    break;
+                                }
+                                let chunk: Value = match serde_json::from_str(payload) {
+                                    Ok(v) => v,
+                                    Err(_) => continue,
+                                };
+                                lines_processed += 1;
+
+                                if let Some(err) = chunk.get("error") {
+                                    let msg = err["message"]
+                                        .as_str()
+                                        .unwrap_or("unknown provider error")
+                                        .to_string();
+                                    sse_error = Some(msg);
+                                    break;
+                                }
+
+                                let choices = match chunk["choices"].as_array() {
+                                    Some(c) if !c.is_empty() => &c[0],
+                                    _ => continue,
+                                };
+                                let delta = &choices["delta"];
+
+                                if !started {
+                                    started = true;
+                                    let model = chunk["model"].as_str().unwrap_or(&config.model);
+                                    yield ProviderEvent::ResponseStart {
+                                        model: model.to_string(),
+                                    };
+                                }
+
+                                if let Some(text_content) = delta["content"].as_str() {
+                                    if !text_content.is_empty() {
+                                        content_chunks += 1;
+                                        yield ProviderEvent::TextDelta(text_content.to_string());
+                                    }
+                                }
+                                if let Some(reasoning) = delta["reasoning_content"].as_str() {
+                                    if !reasoning.is_empty() {
+                                        yield ProviderEvent::ThinkingDelta(reasoning.to_string());
+                                    }
+                                }
+                                if let Some(tc_deltas) = delta["tool_calls"].as_array() {
+                                    for tc_delta in tc_deltas {
+                                        let index = tc_delta["index"].as_u64().unwrap_or(0) as u32;
+                                        let builder = tool_builders.entry(index).or_default();
+                                        if let Some(id) = tc_delta["id"].as_str() {
+                                            builder.id = id.to_string();
+                                        }
+                                        if let Some(name) = tc_delta["function"]["name"].as_str() {
+                                            builder.name = name.to_string();
+                                        }
+                                        if let Some(args) = tc_delta["function"]["arguments"].as_str() {
+                                            builder.arguments_parts.push(args.to_string());
+                                        }
+                                    }
+                                }
+                                if let Some(fr) = choices["finish_reason"].as_str() {
+                                    if !fr.is_empty() {
+                                        finish_reason = Some(fr.to_string());
+                                    }
+                                }
+                            }
+
+                            if sse_error.is_some() {
+                                break;
                             }
                         }
 
@@ -303,8 +420,6 @@ impl OpenAIProvider {
                                 lines_processed,
                                 started,
                                 ?finish_reason,
-                                body_len = text.len(),
-                                body_preview = %text.chars().take(300).collect::<String>(),
                                 "no text content or tool calls in response"
                             );
                         }

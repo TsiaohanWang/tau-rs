@@ -20,6 +20,20 @@ impl EditExecutor {
     }
 }
 
+/// Strip BOM from the front of a string, returning `(had_bom, content_without_bom)`.
+fn strip_bom(s: &str) -> (bool, &str) {
+    if let Some(stripped) = s.strip_prefix('\u{FEFF}') {
+        (true, stripped)
+    } else {
+        (false, s)
+    }
+}
+
+/// Normalize line endings: convert `\r\n` → `\n` for matching purposes.
+fn normalize_lf(s: &str) -> String {
+    s.replace("\r\n", "\n")
+}
+
 #[async_trait]
 impl ToolExecutor for EditExecutor {
     async fn execute(
@@ -44,7 +58,6 @@ impl ToolExecutor for EditExecutor {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::new("Missing required argument: new_text"))?;
 
-        // Resolve path relative to cwd
         let file_path = if let Some(stripped) = path.strip_prefix('~') {
             let home = dirs::home_dir()
                 .ok_or_else(|| ToolError::new("Cannot determine home directory"))?;
@@ -55,13 +68,16 @@ impl ToolExecutor for EditExecutor {
             self.cwd.join(path)
         };
 
-        // Read file content
-        let content = tokio::fs::read_to_string(&file_path)
+        let raw_content = tokio::fs::read_to_string(&file_path)
             .await
             .map_err(|e| ToolError::new(format!("Failed to read file '{}': {}", path, e)))?;
 
-        // Check if old_text exists in the file
-        let occurrences = content.matches(old_text).count();
+        let (had_bom, content_no_bom) = strip_bom(&raw_content);
+        let normalized_content = normalize_lf(content_no_bom);
+        let normalized_old = normalize_lf(old_text);
+        let normalized_new = normalize_lf(new_text);
+
+        let occurrences = normalized_content.matches(&*normalized_old).count();
 
         if occurrences == 0 {
             return Err(ToolError::new(format!(
@@ -77,18 +93,44 @@ impl ToolExecutor for EditExecutor {
             )));
         }
 
-        // Replace old_text with new_text
-        let new_content = content.replace(old_text, new_text);
+        let new_content_owned = normalized_content.replace(&*normalized_old, &normalized_new);
 
-        // Write back to file
-        tokio::fs::write(&file_path, &new_content)
-            .await
-            .map_err(|e| ToolError::new(format!("Failed to write file '{}': {}", path, e)))?;
+        // Re-add BOM if the original had one
+        let final_content = if had_bom {
+            format!("\u{FEFF}{new_content_owned}")
+        } else {
+            new_content_owned.clone()
+        };
 
-        Ok(AgentToolResult::from_text(format!(
-            "Successfully edited '{}'",
-            path
-        )))
+        // Atomic write
+        let dir = file_path.parent().unwrap_or(Path::new("."));
+        let mut tmp = tempfile::NamedTempFile::new_in(dir)
+            .map_err(|e| ToolError::new(format!("Failed to create tempfile: {e}")))?;
+        std::io::Write::write_all(&mut tmp, final_content.as_bytes())
+            .map_err(|e| ToolError::new(format!("Failed to write tempfile: {e}")))?;
+        tmp.persist(&file_path)
+            .map_err(|e| ToolError::new(format!("Failed to persist file '{}': {e}", path)))?;
+
+        // Generate diff for the result
+        let diff = similar::TextDiff::from_lines(&normalized_content, &new_content_owned);
+        let mut diff_text = String::new();
+        for change in diff.iter_all_changes() {
+            let sign = match change.tag() {
+                similar::ChangeTag::Delete => "-",
+                similar::ChangeTag::Insert => "+",
+                similar::ChangeTag::Equal => continue,
+            };
+            diff_text.push_str(sign);
+            diff_text.push_str(change.as_str().unwrap_or(""));
+        }
+
+        let result_msg = if diff_text.is_empty() {
+            format!("Successfully edited '{}' (no net change)", path)
+        } else {
+            format!("Successfully edited '{}'\n\n{}", path, diff_text)
+        };
+
+        Ok(AgentToolResult::from_text(result_msg))
     }
 }
 
@@ -203,6 +245,79 @@ mod tests {
         let result = executor.execute("test-id", &args, None, None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("found 3 times"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_normalizes_crlf() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.txt");
+        tokio::fs::write(&file_path, "hello\r\nworld\r\n")
+            .await
+            .unwrap();
+
+        let executor = EditExecutor::new(temp_dir.path());
+        let mut args = Map::new();
+        args.insert("path".to_string(), json!("test.txt"));
+        args.insert("old_text".to_string(), json!("hello\nworld"));
+        args.insert("new_text".to_string(), json!("goodbye\nworld"));
+
+        let result = executor
+            .execute("test-id", &args, None, None)
+            .await
+            .unwrap();
+        assert!(result.text().contains("Successfully edited"));
+
+        let content = tokio::fs::read_to_string(&file_path).await.unwrap();
+        // After normalize+replace, the file uses \n line endings
+        assert_eq!(content, "goodbye\nworld\n");
+    }
+
+    #[tokio::test]
+    async fn test_edit_preserves_bom() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.txt");
+        tokio::fs::write(&file_path, "\u{FEFF}hello world")
+            .await
+            .unwrap();
+
+        let executor = EditExecutor::new(temp_dir.path());
+        let mut args = Map::new();
+        args.insert("path".to_string(), json!("test.txt"));
+        args.insert("old_text".to_string(), json!("hello"));
+        args.insert("new_text".to_string(), json!("goodbye"));
+
+        let result = executor
+            .execute("test-id", &args, None, None)
+            .await
+            .unwrap();
+        assert!(result.text().contains("Successfully edited"));
+
+        let content = tokio::fs::read_to_string(&file_path).await.unwrap();
+        assert!(content.starts_with('\u{FEFF}'));
+        assert_eq!(content, "\u{FEFF}goodbye world");
+    }
+
+    #[tokio::test]
+    async fn test_edit_returns_diff() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.txt");
+        tokio::fs::write(&file_path, "line1\nline2\nline3")
+            .await
+            .unwrap();
+
+        let executor = EditExecutor::new(temp_dir.path());
+        let mut args = Map::new();
+        args.insert("path".to_string(), json!("test.txt"));
+        args.insert("old_text".to_string(), json!("line2"));
+        args.insert("new_text".to_string(), json!("LINE2"));
+
+        let result = executor
+            .execute("test-id", &args, None, None)
+            .await
+            .unwrap();
+        let text = result.text();
+        assert!(text.contains("-line2"));
+        assert!(text.contains("+LINE2"));
     }
 
     #[test]

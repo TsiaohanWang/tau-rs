@@ -11,7 +11,8 @@ use tau_agent::harness::{AgentHarness, AgentHarnessConfig, QueueMode};
 use tau_agent::provider::ModelProvider;
 use tau_ai::anthropic::{AnthropicConfig, AnthropicModelProvider, AnthropicProvider};
 use tau_ai::openai::{OpenAIConfig, OpenAIModelProvider, OpenAIProvider};
-use tau_types::AgentEvent;
+use tau_coding::config::{CatalogConfig, ProviderKind, load_user_or_default};
+use tau_types::{AgentEvent, AssistantMessageEvent};
 
 #[derive(Parser)]
 #[command(
@@ -68,7 +69,6 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Load .env from current directory or parent directories
     let _ = dotenvy::dotenv();
 
     let cli = Cli::parse();
@@ -89,8 +89,7 @@ async fn main() -> anyhow::Result<()> {
         config::ProvidersConfig::load(&home.providers_path()).context("loading providers.json")?;
     let credentials = config::CredentialsConfig::load(&home.credentials_path())
         .context("loading credentials.json")?;
-    let catalog =
-        config::CatalogConfig::load(&home.catalog_path()).context("loading catalog.toml")?;
+    let catalog = load_user_or_default(&home.catalog_path()).context("loading catalog.toml")?;
 
     match cli.command {
         Some(Commands::Providers) => {
@@ -114,7 +113,9 @@ async fn main() -> anyhow::Result<()> {
                     .and_then(|p| p.default_model.clone())
                     .or_else(|| {
                         catalog
-                            .find_provider(provider_name)
+                            .providers
+                            .iter()
+                            .find(|p| p.name == provider_name)
                             .and_then(|p| p.default_model.clone())
                     })
                     .unwrap_or_else(|| "gpt-4o".to_string())
@@ -131,13 +132,23 @@ async fn main() -> anyhow::Result<()> {
                 .map(|s| s as u64)
                 .unwrap_or(60);
 
-            let kind = config::ProviderKind::from_catalog(&catalog, provider_name);
+            let kind = catalog
+                .providers
+                .iter()
+                .find(|p| p.name == provider_name)
+                .map(ProviderKind::from_provider)
+                .unwrap_or(ProviderKind::OpenaiCompatible);
+
             let base_url = catalog
-                .find_provider(provider_name)
+                .providers
+                .iter()
+                .find(|p| p.name == provider_name)
                 .and_then(|p| p.base_url.clone())
                 .unwrap_or_else(|| match kind {
-                    config::ProviderKind::Anthropic => "https://api.anthropic.com".to_string(),
-                    config::ProviderKind::OpenaiCompatible => "https://api.openai.com".to_string(),
+                    ProviderKind::Anthropic => "https://api.anthropic.com".to_string(),
+                    ProviderKind::OpenaiCompatible | ProviderKind::OpenaiResponses => {
+                        "https://api.openai.com".to_string()
+                    }
                 });
 
             let prompt_text = if cli.prompt.is_empty() {
@@ -146,71 +157,27 @@ async fn main() -> anyhow::Result<()> {
                 Some(cli.prompt.join(" "))
             };
 
+            let model_provider = build_provider(
+                kind,
+                &api_key,
+                &base_url,
+                &model,
+                cli.max_tokens,
+                max_retries,
+                timeout,
+            );
+
             if cli.print {
                 let prompt = prompt_text.context("--print requires a prompt argument")?;
                 let cwd = std::env::current_dir().context("failed to get current directory")?;
-                let model_provider: Arc<dyn ModelProvider + Send + Sync> = match kind {
-                    config::ProviderKind::Anthropic => {
-                        let cfg = AnthropicConfig {
-                            api_key,
-                            base_url,
-                            model: model.clone(),
-                            max_tokens: cli.max_tokens,
-                            max_retries,
-                            timeout_seconds: timeout,
-                            ..Default::default()
-                        };
-                        let provider = AnthropicProvider::new(cfg);
-                        Arc::new(AnthropicModelProvider::new(provider))
-                    }
-                    config::ProviderKind::OpenaiCompatible => {
-                        let cfg = OpenAIConfig {
-                            api_key,
-                            base_url,
-                            model: model.clone(),
-                            max_retries,
-                            timeout_seconds: timeout,
-                            ..Default::default()
-                        };
-                        let provider = OpenAIProvider::new(cfg);
-                        Arc::new(OpenAIModelProvider::new(provider))
-                    }
-                };
                 print_once(model_provider, &system, &prompt, &model, &cwd, &home).await?;
             } else {
                 if prompt_text.is_some() {
                     bail!("interactive mode does not accept a prompt; use --print with a prompt");
                 }
                 let cwd = std::env::current_dir().context("failed to get current directory")?;
-                let model_provider: Arc<dyn ModelProvider + Send + Sync> = match kind {
-                    config::ProviderKind::Anthropic => {
-                        let cfg = AnthropicConfig {
-                            api_key,
-                            base_url,
-                            model: model.clone(),
-                            max_tokens: cli.max_tokens,
-                            max_retries,
-                            timeout_seconds: timeout,
-                            ..Default::default()
-                        };
-                        let provider = AnthropicProvider::new(cfg);
-                        Arc::new(AnthropicModelProvider::new(provider))
-                    }
-                    config::ProviderKind::OpenaiCompatible => {
-                        let cfg = OpenAIConfig {
-                            api_key,
-                            base_url,
-                            model: model.clone(),
-                            max_retries,
-                            timeout_seconds: timeout,
-                            ..Default::default()
-                        };
-                        let provider = OpenAIProvider::new(cfg);
-                        Arc::new(OpenAIModelProvider::new(provider))
-                    }
-                };
                 eprintln!("tau-rs ({provider_name}) | type your message (Ctrl-D to exit)");
-                run_repl(model_provider, &system, &model, &cwd, &home).await?;
+                run_repl(model_provider, &system, &model, &cwd, &home, cli.verbose).await?;
             }
         }
     }
@@ -219,10 +186,54 @@ async fn main() -> anyhow::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Provider construction
+// ---------------------------------------------------------------------------
+
+/// Build a `ModelProvider` trait object from the catalog kind and resolved
+/// configuration. Handles Anthropic, OpenAI-compatible, and OpenAI-responses
+/// dispatch in one place (previously duplicated across print/REPL branches).
+fn build_provider(
+    kind: ProviderKind,
+    api_key: &str,
+    base_url: &str,
+    model: &str,
+    max_tokens: Option<u32>,
+    max_retries: u32,
+    timeout: u64,
+) -> Arc<dyn ModelProvider + Send + Sync> {
+    match kind {
+        ProviderKind::Anthropic => {
+            let cfg = AnthropicConfig {
+                api_key: api_key.to_string(),
+                base_url: base_url.to_string(),
+                model: model.to_string(),
+                max_tokens,
+                max_retries,
+                timeout_seconds: timeout,
+                ..Default::default()
+            };
+            Arc::new(AnthropicModelProvider::new(AnthropicProvider::new(cfg)))
+        }
+        ProviderKind::OpenaiCompatible | ProviderKind::OpenaiResponses => {
+            let cfg = OpenAIConfig {
+                api_key: api_key.to_string(),
+                base_url: base_url.to_string(),
+                model: model.to_string(),
+                max_tokens,
+                max_retries,
+                timeout_seconds: timeout,
+                ..Default::default()
+            };
+            Arc::new(OpenAIModelProvider::new(OpenAIProvider::new(cfg)))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
 
-fn cmd_providers(catalog: &config::CatalogConfig) {
+fn cmd_providers(catalog: &CatalogConfig) {
     println!("Available providers (catalog.toml):");
     for p in &catalog.providers {
         let model = p.default_model.as_deref().unwrap_or("n/a");
@@ -241,11 +252,11 @@ fn cmd_providers(catalog: &config::CatalogConfig) {
 fn cmd_config(
     name: &str,
     providers: &config::ProvidersConfig,
-    catalog: &config::CatalogConfig,
+    catalog: &CatalogConfig,
     credentials: &config::CredentialsConfig,
 ) -> anyhow::Result<()> {
     let prefs = providers.provider_preferences.get(name);
-    let cat = catalog.find_provider(name);
+    let cat = catalog.providers.iter().find(|p| p.name == name);
 
     println!("Provider: {name}");
     if let Some(p) = prefs {
@@ -289,24 +300,19 @@ fn cmd_config(
 // Session persistence helpers
 // ---------------------------------------------------------------------------
 
-/// Open (or create) a per-project session journal, append a `session_info`
-/// entry with the current cwd, and return the storage handle along with the
-/// session id.
-fn open_or_create_session(
+async fn open_or_create_session(
     home: &config::TauHome,
     project_dir: &Path,
 ) -> anyhow::Result<(String, tau_coding::session::JsonlSessionStorage)> {
     let sessions_dir = home.root.join("sessions");
     let mgr = tau_coding::session::SessionManager::new(sessions_dir);
-    let (path, storage) = mgr.create(project_dir)?;
+    let (path, storage) = mgr.create(project_dir).await?;
     let session_id = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("unknown")
         .to_string();
 
-    // Seed the journal with a session_info row so the file is non-empty and
-    // downstream tooling always sees the header first.
     let info = tau_types::SessionEntry::SessionInfo(tau_types::SessionInfoEntry {
         id: tau_types::message::new_entry_id(),
         parent_id: None,
@@ -316,14 +322,10 @@ fn open_or_create_session(
         cwd: project_dir.to_str().map(|s| s.to_string()),
         title: None,
     });
-    let rt = tokio::runtime::Handle::current();
-    rt.block_on(storage.append(&info))?;
+    storage.append(&info).await?;
     Ok((session_id, storage))
 }
 
-/// Persist a single agent message as a `message` entry, then append a `leaf`
-/// entry pointing at it (matching the Python journal shape: each completed
-/// assistant/user turn is followed by a leaf row so the tree can be sketched).
 async fn persist_message(
     storage: &tau_coding::session::JsonlSessionStorage,
     message: tau_types::AgentMessage,
@@ -349,7 +351,6 @@ async fn persist_message(
     Ok(id)
 }
 
-/// Build the shared `AgentHarness` used by both print and REPL modes.
 fn build_harness(
     provider: Arc<dyn ModelProvider + Send + Sync>,
     system: &str,
@@ -370,7 +371,7 @@ fn build_harness(
 }
 
 // ---------------------------------------------------------------------------
-// REPL — interactive loop over AgentHarness + session persistence
+// REPL
 // ---------------------------------------------------------------------------
 
 async fn run_repl(
@@ -379,6 +380,7 @@ async fn run_repl(
     model: &str,
     cwd: &Path,
     home: &config::TauHome,
+    verbose: bool,
 ) -> anyhow::Result<()> {
     let stdin = io::stdin();
     let mut reader = stdin.lock().lines();
@@ -387,9 +389,9 @@ async fn run_repl(
 
     let harness = build_harness(provider, system, model, cwd);
 
-    let session = open_or_create_session(home, cwd)?;
+    let session = open_or_create_session(home, cwd).await?;
     let (_session_id, storage) = session;
-    if cli_verbose() {
+    if verbose {
         writeln!(out, "session: {}", storage.path().display())?;
     }
 
@@ -413,8 +415,6 @@ async fn run_repl(
         write!(out, "Assistant: ")?;
         out.flush()?;
 
-        // Persist the user's message before driving the loop so the journal
-        // ordering matches Python's (user, assistant, leaf).
         let _ = persist_message(
             &storage,
             tau_types::AgentMessage::User(tau_types::UserMessage::new(line.as_str())),
@@ -427,8 +427,7 @@ async fn run_repl(
         while let Some(event) = stream.next().await {
             match event {
                 AgentEvent::MessageUpdate(update) => {
-                    if let tau_types::AssistantMessageEvent::TextDelta(delta) =
-                        &update.assistant_message_event
+                    if let AssistantMessageEvent::TextDelta(delta) = &update.assistant_message_event
                     {
                         write!(out, "{}", delta.delta)?;
                         out.flush()?;
@@ -436,6 +435,20 @@ async fn run_repl(
                 }
                 AgentEvent::MessageEnd(end) => {
                     final_assistant = Some(end.message);
+                }
+                AgentEvent::ToolExecutionStart(start) => {
+                    eprintln!("[tool: {}]", start.tool_name);
+                }
+                AgentEvent::ToolExecutionUpdate(_) => {}
+                AgentEvent::ToolExecutionEnd(end) => {
+                    let preview = end.result.text();
+                    let preview = if preview.len() > 120 {
+                        format!("{}…", &preview[..120])
+                    } else {
+                        preview
+                    };
+                    let status = if end.is_error { " error" } else { "" };
+                    eprintln!("[tool: {}{} → {}]", end.tool_name, status, preview);
                 }
                 AgentEvent::AgentEnd(_) => {
                     writeln!(out)?;
@@ -452,7 +465,7 @@ async fn run_repl(
 }
 
 // ---------------------------------------------------------------------------
-// --print mode — single-shot query, prints to stdout and persists session
+// --print mode
 // ---------------------------------------------------------------------------
 
 async fn print_once(
@@ -465,8 +478,7 @@ async fn print_once(
 ) -> anyhow::Result<()> {
     let harness = build_harness(provider, system, model, cwd);
 
-    // Persistence failures should never break print mode — log and continue.
-    let session = open_or_create_session(home, cwd).ok();
+    let session = open_or_create_session(home, cwd).await.ok();
     if let Some((_, ref storage)) = session {
         let _ = persist_message(
             storage,
@@ -485,9 +497,7 @@ async fn print_once(
     while let Some(event) = stream.next().await {
         match event {
             AgentEvent::MessageUpdate(update) => {
-                if let tau_types::AssistantMessageEvent::TextDelta(delta) =
-                    &update.assistant_message_event
-                {
+                if let AssistantMessageEvent::TextDelta(delta) = &update.assistant_message_event {
                     got_content = true;
                     write!(out, "{}", delta.delta)?;
                     out.flush()?;
@@ -495,6 +505,20 @@ async fn print_once(
             }
             AgentEvent::MessageEnd(end) => {
                 final_assistant = Some(end.message);
+            }
+            AgentEvent::ToolExecutionStart(start) => {
+                eprintln!("[tool: {}]", start.tool_name);
+            }
+            AgentEvent::ToolExecutionUpdate(_) => {}
+            AgentEvent::ToolExecutionEnd(end) => {
+                let preview = end.result.text();
+                let preview = if preview.len() > 120 {
+                    format!("{}…", &preview[..120])
+                } else {
+                    preview
+                };
+                let status = if end.is_error { " error" } else { "" };
+                eprintln!("[tool: {}{} → {}]", end.tool_name, status, preview);
             }
             AgentEvent::AgentEnd(_) => {
                 writeln!(out)?;
@@ -513,10 +537,4 @@ async fn print_once(
         bail!("no content received from provider (possible rate limit or empty response)");
     }
     Ok(())
-}
-
-/// Globally inspect verbosity. Kept as a tiny helper so the REPL/print paths
-/// can surface session-path info without threading `cli` through call chains.
-fn cli_verbose() -> bool {
-    std::env::var("TAU_VERBOSE").is_ok()
 }
