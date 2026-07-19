@@ -293,6 +293,15 @@ fn parse_command(line: &str) -> Option<Command> { /* "/…" 前缀 */ }
 **验收**：
 - 双向任一方向都不报 JSON 解析错；session 文件每一行都是合法 JSON 对象。
 - golden diff 通过 CI（`cargo test --workspace --features tau-agent/testing`）。
+
+**结果（已完成 ✅ Done）**：
+- 新增 `crates/tau-coding/tests/test_compat.rs`，6 个测试：
+  - `golden_short_conversation_roundtrips_byte_for_byte` / `golden_tool_conversation_roundtrips_byte_for_byte`：Rust 序列化出的字节稳定（assistant / toolResult 时间戳固定为 `1700000000000`）且与 committed golden 常量逐字节相等；golden 行经 `entry_from_json_line` 再 `entry_to_json_line` 仍逐字节相同。
+  - `reads_python_style_short_conversation` / `reads_python_style_tool_conversation`：直接用 Python 风格 JSONL fixture（v2 wire 格式）解析，校验消息角色/内容/工具调用/工具结果。
+  - `reads_v1_assistant_string_content`：v1 Python 的 assistant `content` 裸字符串经迁移路径解析。
+  - `resume_loads_python_style_session`：`CodingSession::load` 加载 Python 风格文件后重建 2 条消息，工具已接线可继续。
+- 测试总数 174 → 180。
+
 - 在 architecture-issues.md 把 #3 #10 #11 从 🚧 Partial 改为 ✅ Fixed（自动同步 architecture.md 状态、README badge 测试计数）。
 
 ---

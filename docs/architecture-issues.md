@@ -340,6 +340,18 @@ pub enum ToolExecutionMode {
 
 ---
 
+## Phase 5.6 — 双向兼容验证（已完成 ✅ Done, 2026-07-19）
+
+新增 `crates/tau-coding/tests/test_compat.rs`（6 测试），验证 tau-rs ↔ Python tau 的 session 文件双向兼容：
+
+- **写入方向 golden**：Rust 序列化出的每行字节稳定（assistant 与 toolResult 的 `timestamp` 固定为 `1700000000000`，避免非确定性），与 committed golden 常量逐字节相等；golden 行经 `entry_from_json_line` → `entry_to_json_line` 仍逐字节相同。
+- **读取方向**：直接用 Python 风格 v2 wire 格式 JSONL fixture 解析，校验 user/assistant/toolCall/toolResult 角色与内容；另含 v1 裸字符串 `content` 迁移路径解析。
+- **resume 重建**：`CodingSession::load` 加载 Python 风格文件后重建消息并可继续。
+
+测试总数 174 → 179。#3 / #10 / #11 此前已在 5.1 / 5.5 标记 ✅ Fixed，本阶段无需改动。
+
+---
+
 ## Cross-Cutting Observations
 
 ### Architectural Strengths (things to preserve)
