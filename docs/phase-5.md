@@ -208,7 +208,7 @@ fn parse_command(line: &str) -> Option<Command> { /* "/…" 前缀 */ }
 
 ---
 
-### 3.4 子阶段 5.4 — 自动命名 + 斜杠命令 + `!`/`!!` shell escape
+### 3.4 子阶段 5.4 — 自动命名 + 斜杠命令 + `!`/`!!` shell escape ✅ Done
 
 **目标**：REPL 可用基础命令集；session 有非空 title；shell escape 可直接跑命令不污染 provider 上下文。
 
@@ -227,6 +227,16 @@ fn parse_command(line: &str) -> Option<Command> { /* "/…" 前缀 */ }
 - 单测 `naming::auto_title`：`"  Fix bug in parser\nmore"` → `"Fix bug"`；空字符串 + `/tmp/foo` → `"foo"`。
 - 单测 shell escape：`"! echo hi"` → 触发 spawn，输出 `"hi\n"`；`"!!"` 在上一条 shell 行为 `"echo hi"` 时返回 `"hi\n"`。
 - 手动： REPL 输 `/help` 列出命令，`/model deepseek-v4-flash-free` 后续 prompt 走新模型（Phase 5 不实现热切换 persist，5.4 只在内存切）。
+
+**实现纪要**：
+- `naming.rs::auto_title` — 首行去空白取前 8 字符；第 8 字符为空白边界时去尾空白不补省略号，否则补 `…`；空输入回退 `cwd.file_name()` / `"session"`。
+- `CodingSession::ensure_title` 在 `prompt` 流最开头（仅首调）写一条 `LabelEntry` 链到 `last_entry_id`；`load` 时从 `SessionInfo.title` 恢复，避免重复写 Label。
+- `commands.rs`：`/help /compact /clear /model <n> /provider <n> /exit|/quit /resume [id]`；缺参的 `/model`、`/provider` 报 `Err`（usage 提示）；`dispatch` 返回 `CommandOutcome::{Handled, ClearMessages, Quit}`。
+- `shell_escape.rs`：`!!` 仅当整行独立（或 `!! ` 后跟命令）才算 Repeat；`!!not shell` 这类歧义前缀返回 `None` 落到普通 prompt。
+- `main.rs` 抽出 `handle_repl_line`（shell → command → prompt 三级分发），`run_repl` 与 `run_repl_resumed` 共用，消除原本两份重复循环。
+- harness 新增 `set_model` / `clear_messages`（`set_provider` 为显示用，凭证重建推迟）。
+
+**已知遗留（推迟到后续 Phase）**：`/provider` 与 `/model` 仅内存切，不写回 journal；会话标题目前只落 `LabelEntry`，未回填 `SessionInfo.title` 字段。
 
 ---
 

@@ -11,7 +11,10 @@ use tau_agent::harness::{AgentHarness, AgentHarnessConfig, QueueMode};
 use tau_agent::provider::ModelProvider;
 use tau_ai::anthropic::{AnthropicConfig, AnthropicModelProvider, AnthropicProvider};
 use tau_ai::openai::{OpenAIConfig, OpenAIModelProvider, OpenAIProvider};
+use tau_coding::commands::{self, CommandOutcome};
 use tau_coding::config::{CatalogConfig, ProviderKind, load_user_or_default};
+use tau_coding::session::CodingSession;
+use tau_coding::shell_escape::{self, ShellLine};
 use tau_types::{AgentEvent, AssistantMessageEvent};
 
 #[derive(Parser)]
@@ -373,6 +376,7 @@ async fn open_or_create_session(
         context_window: None,
         compaction_reserve: tau_coding::session::DEFAULT_RESERVE,
         max_turns: Some(20),
+        provider_name: None,
     };
     let mut session = tau_coding::session::CodingSession::new(storage, cfg);
     session.write_session_info().await?;
@@ -401,6 +405,7 @@ async fn resume_session(
         context_window: None,
         compaction_reserve: tau_coding::session::DEFAULT_RESERVE,
         max_turns: Some(20),
+        provider_name: None,
     };
     tau_coding::session::CodingSession::load(storage, cfg)
         .await
@@ -431,6 +436,8 @@ async fn run_repl(
         writeln!(out, "session: {}", session.storage().path().display())?;
     }
 
+    let mut prev_shell: Option<String> = None;
+
     loop {
         write!(out, "You: ")?;
         out.flush()?;
@@ -444,9 +451,12 @@ async fn run_repl(
             }
         };
 
-        if line.trim().is_empty() {
-            continue;
-        }
+        let result = handle_repl_line(&mut session, &line, &mut out, cwd, &mut prev_shell).await?;
+        let prompt_text = match result {
+            ReplLineResult::Quit => break,
+            ReplLineResult::Handled => continue,
+            ReplLineResult::RunPrompt(text) => text,
+        };
 
         write!(out, "Assistant: ")?;
         out.flush()?;
@@ -455,7 +465,7 @@ async fn run_repl(
         // the user message (pre-run) and each assistant `MessageEnd` event
         // (side effect). The old `persist_message` calls are gone — see
         // architecture-issues.md #3 closure (ADR-P5-2).
-        let stream = session.prompt(line.as_str())?;
+        let stream = session.prompt(prompt_text.as_str())?;
         futures::pin_mut!(stream);
         while let Some(event) = stream.next().await {
             match event {
@@ -489,6 +499,81 @@ async fn run_repl(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Shared REPL line handler
+// ---------------------------------------------------------------------------
+
+/// Outcome of handling a single REPL input line.
+enum ReplLineResult {
+    /// Print the session and quit.
+    Quit,
+    /// The line was a command or shell escape; nothing else to do.
+    Handled,
+    /// Run this text as a normal prompt through `session.prompt`.
+    RunPrompt(String),
+}
+
+/// Process one REPL line: shell escape (`!`/`!!`) → slash command (`/…`) →
+/// plain prompt. Keeps `prev_shell` updated with the last `! <cmd>` so `!!`
+/// can replay it. The caller is responsible for actually driving the prompt
+/// stream when [`ReplLineResult::RunPrompt`] is returned.
+async fn handle_repl_line(
+    session: &mut CodingSession,
+    line: &str,
+    out: &mut impl std::io::Write,
+    cwd: &Path,
+    prev_shell: &mut Option<String>,
+) -> anyhow::Result<ReplLineResult> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(ReplLineResult::Handled);
+    }
+
+    // 1. Shell escape: `! cmd` or `!!`.
+    if let Some(shell) = shell_escape::parse_shell(line) {
+        match &shell {
+            ShellLine::Once(cmd) if cmd.trim().is_empty() => {
+                writeln!(out, "(empty shell command)")?;
+            }
+            ShellLine::Once(cmd) => {
+                *prev_shell = Some(cmd.clone());
+                let output = shell_escape::run(&shell, cwd, prev_shell.as_deref()).await;
+                writeln!(out, "{output}")?;
+            }
+            ShellLine::Repeat => {
+                let output = shell_escape::run(&shell, cwd, prev_shell.as_deref()).await;
+                writeln!(out, "{output}")?;
+            }
+        }
+        return Ok(ReplLineResult::Handled);
+    }
+
+    // 2. Slash command.
+    if let Some(parsed) = commands::parse(line) {
+        match parsed {
+            Ok(cmd) => {
+                let outcome = commands::dispatch(session, cmd, cwd).await?;
+                match outcome {
+                    CommandOutcome::Quit => return Ok(ReplLineResult::Quit),
+                    CommandOutcome::ClearMessages => {
+                        writeln!(out, "(cleared in-memory messages)")?;
+                    }
+                    CommandOutcome::Handled(msg) => {
+                        writeln!(out, "{msg}")?;
+                    }
+                }
+            }
+            Err(msg) => {
+                writeln!(out, "error: {msg}")?;
+            }
+        }
+        return Ok(ReplLineResult::Handled);
+    }
+
+    // 3. Plain prompt.
+    Ok(ReplLineResult::RunPrompt(line.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -698,6 +783,8 @@ async fn run_repl_resumed(
         )?;
     }
 
+    let mut prev_shell: Option<String> = None;
+
     loop {
         write!(out, "You: ")?;
         out.flush()?;
@@ -711,14 +798,17 @@ async fn run_repl_resumed(
             }
         };
 
-        if line.trim().is_empty() {
-            continue;
-        }
+        let result = handle_repl_line(&mut session, &line, &mut out, cwd, &mut prev_shell).await?;
+        let prompt_text = match result {
+            ReplLineResult::Quit => break,
+            ReplLineResult::Handled => continue,
+            ReplLineResult::RunPrompt(text) => text,
+        };
 
         write!(out, "Assistant: ")?;
         out.flush()?;
 
-        let stream = session.prompt(line.as_str())?;
+        let stream = session.prompt(prompt_text.as_str())?;
         futures::pin_mut!(stream);
         while let Some(event) = stream.next().await {
             match event {

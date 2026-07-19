@@ -25,6 +25,9 @@ pub struct CodingSessionConfig {
     pub max_turns: Option<u32>,
     pub context_window: Option<u64>,
     pub compaction_reserve: u64,
+    /// Requested provider name (in-memory only; set via `/provider`). Not used
+    /// to rebuild credentials in Phase 5.
+    pub provider_name: Option<String>,
 }
 
 /// The composition root for a coding session.
@@ -53,6 +56,10 @@ pub struct CodingSession {
     /// triggers a compaction + retry, this is set to `true` so that if the
     /// retried call also fails we do not compact again.
     is_retrying_compaction: bool,
+    /// Auto-derived session title (from the first user prompt). `None` until
+    /// the first `prompt` call persists a `LabelEntry`. Set on `load` from the
+    /// session's `SessionInfo.title` when present.
+    title: Option<String>,
 }
 
 impl CodingSession {
@@ -81,6 +88,7 @@ impl CodingSession {
             entry_ids: Vec::new(),
             config,
             is_retrying_compaction: false,
+            title: None,
         }
     }
 
@@ -135,6 +143,14 @@ impl CodingSession {
             messages.clone(),
         );
 
+        // Restore the session title from the persisted `SessionInfo`, if any.
+        // This keeps a resumed session from re-deriving a fresh title on the
+        // next `prompt` call (which would append a duplicate `LabelEntry`).
+        let title = entries.iter().find_map(|e| match e {
+            SessionEntry::SessionInfo(info) => info.title.clone(),
+            _ => None,
+        });
+
         Ok(Self {
             storage,
             harness,
@@ -144,6 +160,7 @@ impl CodingSession {
             entry_ids,
             config,
             is_retrying_compaction: false,
+            title,
         })
     }
 
@@ -170,6 +187,79 @@ impl CodingSession {
         &self.config.model
     }
 
+    /// The auto-derived (or loaded) session title, if any.
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    /// Switch the active model (in-memory only — Phase 5 does not persist the
+    /// change to the journal). The harness is rebuilt so subsequent prompts use
+    /// the new model.
+    pub fn set_model(&mut self, model: String) {
+        self.config.model = model.clone();
+        self.harness.set_model(model);
+    }
+
+    /// Record the requested provider name in memory. Phase 5 does not persist
+    /// the change or rebuild credentials for an arbitrary provider, so this is
+    /// a display-only switch (`model()`-style naming is deferred to a later
+    /// phase that wires credential resolution into the session).
+    pub fn set_provider(&mut self, provider: String) {
+        self.config.provider_name = Some(provider);
+    }
+
+    /// Drop all in-memory messages. The persisted journal is left untouched;
+    /// subsequent prompts start a fresh turn that chains off the last leaf.
+    pub fn clear_messages(&mut self) {
+        self.harness.clear_messages();
+        self.messages.clear();
+        self.entry_ids.clear();
+    }
+
+    /// Force a context compaction now (used by the `/compact` command).
+    /// Returns `Ok(true)` if a compaction was performed, `Ok(false)` if there
+    /// was nothing to compact.
+    pub async fn compact_now(&mut self) -> Result<bool, SessionError> {
+        if self.config.context_window.is_none() {
+            return Ok(false);
+        }
+        let window = self.config.context_window.unwrap();
+        let reserve = self.config.compaction_reserve;
+        let estimate = estimate_context_usage(&self.messages, &[]);
+        if !needs_compaction(&estimate, window, reserve) {
+            return Ok(false);
+        }
+        let target = estimate.estimated_tokens.saturating_sub(window - reserve);
+        match plan_compaction(&self.messages, &self.entry_ids, target) {
+            Some(plan) => {
+                self.execute_compaction(plan).await?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Persist an auto-derived title as a `LabelEntry`, chaining off the last
+    /// persisted entry. No-op if a title has already been set.
+    async fn ensure_title(&mut self, first_user: &str) -> Result<(), SessionError> {
+        if self.title.is_some() {
+            return Ok(());
+        }
+        let title = crate::naming::auto_title(first_user, &self.config.cwd);
+        let id = tau_types::message::new_entry_id();
+        let entry = SessionEntry::Label(tau_types::LabelEntry {
+            id: id.clone(),
+            parent_id: self.last_entry_id.clone(),
+            timestamp: tau_types::current_timestamp_secs(),
+            r#type: tau_types::EntryType::Label,
+            label: title.clone(),
+        });
+        self.storage.append(&entry).await?;
+        self.last_entry_id = Some(id);
+        self.title = Some(title);
+        Ok(())
+    }
+
     /// Append the `SessionInfo` entry to a brand-new session file.
     ///
     /// Should be called once immediately after [`CodingSession::new`] for fresh
@@ -188,8 +278,8 @@ impl CodingSession {
     }
 
     /// Send a user message and return a stream that:
-    /// 1. runs the pre-prompt compaction threshold check (5.3 will lift the
-    ///    summary LLM call here; for now the summary is a debug placeholder);
+    /// 1. runs the pre-prompt compaction threshold check (5.3); on overflow
+    ///    error it triggers one-shot compaction + retry (see `is_overflow_error`);
     /// 2. drives the harness stream;
     /// 3. auto-persists every `MessageEnd` event — both the user prompt echo
     ///    (the agent loop yields `MessageEnd` once per `prompt`) and the
@@ -207,6 +297,13 @@ impl CodingSession {
         text: &'a str,
     ) -> Result<impl futures::Stream<Item = AgentEvent> + Send + 'a, SessionError> {
         Ok(stream! {
+            // 0. Derive + persist a session title from the first user prompt
+            // (ADR-P5-4 auto-naming). Chains off the last persisted entry and
+            // runs only once per session.
+            if self.title.is_none() {
+                let _ = self.ensure_title(text).await;
+            }
+
             // 1. Pre-prompt compaction threshold check (ADR-P5-3 §5.3).
             if let Some(window) = self.config.context_window {
                 let estimate = estimate_context_usage(&self.messages, &[]);
@@ -451,6 +548,7 @@ mod tests {
                 max_turns: Some(4),
                 context_window: None,
                 compaction_reserve: 16384,
+                provider_name: None,
             },
         )
     }
@@ -515,6 +613,7 @@ mod tests {
                 max_turns: Some(20),
                 context_window,
                 compaction_reserve: 16384,
+                provider_name: None,
             },
         )
     }

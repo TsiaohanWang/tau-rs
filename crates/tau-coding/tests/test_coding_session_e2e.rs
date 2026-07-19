@@ -44,6 +44,7 @@ async fn prompt_persists_user_and_assistant_with_parent_chain() {
         max_turns: Some(2),
         context_window: None,
         compaction_reserve: 16384,
+        provider_name: None,
     };
     let mut session = CodingSession::new(storage, cfg);
     session.write_session_info().await.unwrap();
@@ -55,7 +56,8 @@ async fn prompt_persists_user_and_assistant_with_parent_chain() {
     }
 
     let entries = session.storage().read_all().await.unwrap();
-    assert_eq!(entries.len(), 5);
+    // session_info(1) + auto-title Label(1) + (user, leaf, assistant, leaf)(4) = 6
+    assert_eq!(entries.len(), 6);
 
     let user_idx = entries
         .iter()
@@ -109,6 +111,7 @@ async fn prompt_persists_multiple_turns_chaining_off_previous_assistant() {
         max_turns: Some(4),
         context_window: None,
         compaction_reserve: 16384,
+        provider_name: None,
     };
     let mut session = CodingSession::new(storage, cfg);
     session.write_session_info().await.unwrap();
@@ -127,8 +130,8 @@ async fn prompt_persists_multiple_turns_chaining_off_previous_assistant() {
     let entries = session.storage().read_all().await.unwrap();
     let ids: Vec<String> = entries.iter().map(|e| e.id().to_string()).collect();
     assert_eq!(ids[0].len(), 32, "expected uuid length");
-    // sessions_info + (user, leaf, assistant, leaf) x 2 turns = 9
-    assert_eq!(entries.len(), 9);
+    // session_info(1) + auto-title Label(1) + (user,leaf,assistant,leaf) x 2 = 10
+    assert_eq!(entries.len(), 10);
 
     let msgs: Vec<(&str, Option<&str>)> = entries
         .iter()
@@ -147,10 +150,11 @@ async fn prompt_persists_multiple_turns_chaining_off_previous_assistant() {
     assert_eq!(
         msgs,
         vec![
-            ("user", None),
-            ("assistant", Some(ids[1].as_str())),
-            ("user", Some(ids[3].as_str())),
-            ("assistant", Some(ids[5].as_str())),
+            // first user message chains off the auto-title Label entry
+            ("user", Some(ids[1].as_str())),
+            ("assistant", Some(ids[2].as_str())),
+            ("user", Some(ids[4].as_str())),
+            ("assistant", Some(ids[6].as_str())),
         ]
     );
 }
@@ -190,6 +194,7 @@ async fn load_reconstructs_prior_conversation_in_harness_messages() {
             max_turns: Some(2),
             context_window: None,
             compaction_reserve: 16384,
+            provider_name: None,
         },
     );
     session.write_session_info().await.unwrap();
@@ -213,6 +218,7 @@ async fn load_reconstructs_prior_conversation_in_harness_messages() {
             max_turns: Some(2),
             context_window: None,
             compaction_reserve: 16384,
+            provider_name: None,
         },
     )
     .await
@@ -254,6 +260,7 @@ async fn load_reconstructs_prior_conversation_in_harness_messages() {
             max_turns: Some(2),
             context_window: None,
             compaction_reserve: 16384,
+            provider_name: None,
         };
         // Swap provider & rebuild: easiest re-load (load keeps the file as-is).
         // This relies on `load` reconstructing from the file — the harness

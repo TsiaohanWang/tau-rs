@@ -520,8 +520,8 @@ OAuth 交互流、openai-codex provider、google/mistral 适配器、responses A
 | `tau-agent` | 10 | 11 | 21 |
 | `tau-ai` | 18 | 10 | 28 |
 | `tau-cli` | 3 | 10 | 13 |
-| `tau-coding` | 80 | 4 | 84 |
-| **总计** | **115** | **35** | **150** |
+| `tau-coding` | 99 | 4 | 103 |
+| **总计** | **134** | **35** | **169** |
 
 ### 待实现测试（Phase 4 → 已完成）
 

@@ -297,6 +297,27 @@ impl AgentHarness {
         }
     }
 
+    /// Switch the active model (in-memory). Applies to the next run.
+    pub fn set_model(&mut self, model: String) {
+        self.config_shared.model = model;
+    }
+
+    /// Switch the active provider (in-memory). Applies to the next run.
+    pub fn set_provider(&mut self, provider: Arc<dyn ModelProvider + Send + Sync>) {
+        self.config_shared.provider = provider;
+    }
+
+    /// Drop all in-memory messages. The persisted journal (if any) is left
+    /// untouched; the next run starts fresh but still chains off the last leaf
+    /// at the persistence layer.
+    pub fn clear_messages(&self) {
+        if self.state.running.load(SeqCst) {
+            *self.state.replace_during_run.lock().unwrap() = Some(Vec::new());
+        } else {
+            self.state.messages.lock().unwrap().clear();
+        }
+    }
+
     pub fn cancel(&self) {
         if let Some(token) = self.state.signal.lock().unwrap().as_ref() {
             token.cancel();

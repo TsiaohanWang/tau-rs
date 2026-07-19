@@ -19,11 +19,12 @@
 | 8 | 🟡 P2 | 无 compaction — `apply_compaction` 存在但无生成代码 | ✅ Fixed |
 | 9 | 🟡 P2 | main.rs 重复 provider 构造块 — print/REPL 两段近乎相同的 match | ✅ Fixed |
 | 10 | 🟡 P2 | 硬编码 system prompt + 未组装 tool prompt 片段 | ✅ Fixed (5.1) |
-| 11 | 🟡 P2 | REPL 忽略工具事件 — 用户看不到 agent 在做什么 | 🚧 Partial |
+| 11 | 🟡 P2 | REPL 忽略工具事件 — 用户看不到 agent 在做什么 | 🚧 Partial (5.5 收尾) |
 | 12 | 🟡 P2 | `cli_verbose()` 读 TAU_VERBOSE 环境变量反模式 | ✅ Fixed |
 | 13 | 🟡 P2 | IO 风格混用 — `SessionManager` 同步 `std::fs` + `JsonlSessionStorage` async tokio + `block_on` 嵌套 | ✅ Fixed |
 | 14 | 🟢 P3 | 死字段 `ToolExecutionMode` — 定义但从未读取 | ✅ Fixed |
 | 15 | 🟢 P3 | 文档测试计数不一致（architecture.md 85 vs phase-4.md 104） | ✅ Fixed |
+| 16 | 🟡 P2 | 5.4 遗留：`/model`/`/provider` 仅内存切 + 标题未回填 `SessionInfo.title` | 🚧 Partial (推迟) |
 
 ---
 
@@ -315,7 +316,25 @@ pub enum ToolExecutionMode {
 
 **Impact**: Misleading for contributors evaluating project health.
 
-**Fix**: Updated all docs to current 150 count.
+**Fix**: Updated all docs to current 169 count.
+
+---
+
+## Issue #16 — 5.4 遗留：模型/提供方仅内存切 + 标题未回填
+
+**Location**:
+- `crates/tau-coding/src/session/coding_session.rs` — `set_model` / `set_provider` / `set_title`
+- `crates/tau-coding/src/commands.rs` — `Command::Model` / `Command::Provider` / `dispatch`
+
+**Problem**: Phase 5.4 落地了 `/model` 与 `/provider` 斜杠命令，但实现只更新内存（`harness.set_model` 改 `config_shared.model`；`set_provider` 仅记录 `provider_name` 字符串，不重建 provider 凭证）。会话标题（`auto_title` → `LabelEntry`）也只写了 `LabelEntry`，没有回填 `SessionInfo.title` 字段。
+
+**Impact**: 
+- 切换 provider 后实际 prompt 仍走旧 provider（无凭证无法重建 `ModelProvider`）；
+- 跨进程 / 重新打开 session 时标题需从 `LabelEntry` 推断，而 `SessionInfo.title` 始终为 `None`。
+
+**Resolution (deferred)**: 这些属于 Phase 5 显式推迟项（spec 原文："Phase 5 不实现热切换 persist，5.4 只在内存切"）。后续需在 `CodingSession` 持有凭证解析能力（或 CLI 传入 `Arc<dyn ModelProvider>` 工厂）才能完整支持 `/provider` 热切换，并增加 `write_session_info` 时回填 `title` 的逻辑。当前行为可预期、不影响已有测试。
+
+**Status**: 🚧 Partial — 记录在案，等待后续 Phase。
 
 ---
 
