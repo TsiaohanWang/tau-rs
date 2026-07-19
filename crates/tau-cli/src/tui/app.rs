@@ -215,14 +215,17 @@ async fn handle_idle_key(
                 app.running = true;
                 app.state_mut().auto_scroll = true;
 
-                if dispatch_line(app, session, harness, &input, cwd).await? {
-                    return Ok(true);
+                match dispatch_line(app, session, harness, &input, cwd).await? {
+                    LineResult::Quit => return Ok(true),
+                    LineResult::Stream => {
+                        let mut stream = Box::pin(session.prompt(&input)?);
+                        run_stream_loop(app, &mut stream, harness, terminal, key_rx).await?;
+                    }
+                    LineResult::Handled => {
+                        // Command/shell already handled — input cleared,
+                        // just reset running.
+                    }
                 }
-
-                // Back to idle — run the prompt stream with concurrent key
-                // handling and redraw.
-                let mut stream = Box::pin(session.prompt(&input)?);
-                run_stream_loop(app, &mut stream, harness, terminal, key_rx).await?;
                 app.running = false;
             }
             return Ok(false);
@@ -277,29 +280,37 @@ async fn handle_idle_key(
     Ok(false)
 }
 
-/// Dispatch one input line (shell/command).  Returns `true` if the app
-/// should quit.  For chat messages this is a no-op (the calller handles
-/// stream initiation).
+enum LineResult {
+    /// Quit the app.
+    Quit,
+    /// Start a prompt stream (chat message).
+    Stream,
+    /// Command/shell already handled — input cleared, just reset.
+    Handled,
+}
+
+/// Dispatch one input line (shell/command).  Returns how the caller should
+/// proceed.
 async fn dispatch_line(
     app: &mut App,
     session: &mut CodingSession,
     harness: &AgentHarness,
     line: &str,
     cwd: &Path,
-) -> Result<bool> {
+) -> Result<LineResult> {
     harness.cancel();
 
     if let Some(shell) = shell_escape::parse_shell(line) {
         let output = shell_escape::run(&shell, cwd, None).await;
         app.state_mut()
             .add_item_with(ChatItemRole::System, output, None, None, false, None, None);
-        return Ok(false);
+        return Ok(LineResult::Handled);
     }
 
     if let Some(parsed) = commands::parse(line) {
         match parsed {
             Ok(cmd) => match commands::dispatch(session, cmd, cwd).await {
-                Ok(commands::CommandOutcome::Quit) => return Ok(true),
+                Ok(commands::CommandOutcome::Quit) => return Ok(LineResult::Quit),
                 Ok(commands::CommandOutcome::ClearMessages) => {
                     app.state_mut().clear();
                     app.clear_input();
@@ -339,12 +350,12 @@ async fn dispatch_line(
                 );
             }
         }
-        return Ok(false);
+        return Ok(LineResult::Handled);
     }
 
     // Chat message: the adapter adds User from the stream's MessageEnd(User)
     // event — do NOT call add_user_message here or it doubles.
-    Ok(false)
+    Ok(LineResult::Stream)
 }
 
 /// Inner loop: drive the prompt stream with concurrent key handling and
