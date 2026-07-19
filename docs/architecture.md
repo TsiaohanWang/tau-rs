@@ -4,7 +4,7 @@
 
 本文件是 huggingface/tau（Python）到 Rust 重写的总体架构设计与全套迁移计划。它基于对原项目三个包（`tau_ai` ≈4.1k 行、`tau_agent` ≈1.7k 行、`tau_coding` ≈25.7k 行）全部核心源码的通读产出。
 
-> **当前状态**: Phase 1-4 已完成（2026-07-19）。内置工具、AgentHarness 集成、JSONL session 持久化与 catalog 深度合并均已落地；Phase 5 CodingSession 骨架已实现（context-window 估算、compaction 基础、system prompt 组装器、REPL 工具事件显示已落地）。
+> **当前状态**: Phase 1-5 全部完成（含 5.1-5.8），共 **184 测试**全绿，clippy `-D warnings` 与 `fmt` 通过。已用真实 OpenCode 免费模型端到端验证（LRU crate 10/10、resume 18/18、429 退避、wire 双向兼容 golden）。剩余为 Phase 6（REPL）、Phase 7（ratatui TUI）、Phase 8（OAuth / 更多 provider / skills / 扩展）。详见文末 §6 与 §4。
 
 范围决策（已确认）：
 
@@ -429,18 +429,81 @@ reqwest 客户端（代理规整）、手写 SSE 行解析、retry/退避、`can
 `JsonlSessionStorage`（session 文件读写）、`SessionManager`（session 目录管理）、catalog 深度合并、CLI 集成 session 持久化。
 验证：storage 4 + manager 4 + catalog 3 = 11 新测试，workspace 全部 130 测试全绿；session 文件格式与 Python 兼容；内置 catalog 通过 `include_str!` 嵌入，合并逻辑对齐 Python catalog loader。详见 `docs/phase-4.md`。
 
-## Phase 5 — CodingSession + print 模式端到端 ★ 第一个用户可见里程碑
-CodingSession 骨架已落地：context-window token 估算、compaction 基础逻辑、system prompt 组装器（`prompt.rs`）、`coding_session.rs` 组合根骨架。待完成：compaction 三触发完整实现、自动命名、中断修复、terminal `!`/`!!`、命令注册表、三个 print 渲染器、CLI `-p` 模式。
-验证：`tau-rs -p "..."` 跑通并落盘 session；同一 session 文件可被 Python `tau` resume（双向兼容终极验证）。
+## Phase 5 — CodingSession + print 模式端到端 ★ 第一个用户可见里程碑（✅ 已完成 2026-07-19, 5.1–5.8）
+- 5.1 `CodingSession` 组合根接入 CLI，parent_id 链持久化（issue #3/#10 关闭）
+- 5.2 `load`/resume、`--resume` CLI、中断 tool_call 修复（in-memory）
+- 5.3 compaction 三触发（阈值/手动/溢出+单次重试）+ LLM 摘要
+- 5.4 自动命名（`naming.rs`）、斜杠命令（`commands.rs`）、`!`/`!!` shell escape、harness `set_model`/`set_provider`/`clear_messages`
+- 5.5 三渲染器 plain/json/transcript（`render/mod.rs`）+ `EventRenderer` trait + 工具 `render_call`/`render_result`，`--format` 开关
+- 5.6 双向兼容 golden（`test_compat.rs`）：Rust 序列化逐字节 round-trip + Python v2 fixture 解析 + v1 迁移 + resume 重建
+- 5.7 真实 API 端到端验证，修复 `model:"unknown"` 持久化（#17）与 opencode key 名（#18）
+- 5.8 429 限流专用退避 + `Retry-After` 支持 + 默认 `max_retries` 5，opencode 默认模型改 `nemotron-3-ultra-free`
 
-## Phase 6 — 简洁交互 REPL
-rustyline REPL：流式输出、Esc 取消、Enter=steer/Alt+Enter=follow-up、斜杠命令、thinking 切换。
+验证：`tau-rs -p "..."` 跑通并落盘 session；同一 session 文件可被 Python `tau` resume（双向兼容终极验证，5.6 已锁）；真实免费模型多轮工具循环 18/18 测试通过。
 
-## Phase 7 — ratatui TUI（可裁剪）
-顺序：TuiState+adapter（纯，先测）→ transcript/prompt 最小布局 → pickers → autocomplete → sidebar/主题。
+## Phase 6 — 简洁交互 REPL（待实现）
+将 `tau-cli/src/main.rs` 当前基于 `stdin().lock().lines()` 的朴素 REPL 升级为 **rustyline** 驱动，对齐原版 `cli.py` 的交互语义。
 
-## Phase 8 — 补齐与再评估
-OAuth 交互流、openai-codex provider、google/mistral 适配器、responses API、session HTML 导出、update_check、扩展系统再评估（WASM/rhai/子进程 IPC）。
+### 6.1 目标能力（来自原版 `CodingSession.prompt` / `run_terminal_command`）
+- 流式输出 + `Esc` 取消（`CancellationToken` 已就绪，harness 支持 `cancel()`）
+- `Enter` = 新 prompt；运行中 `Enter` = **steer**（harness `steer()`）、`Alt+Enter` = **follow_up**（harness `follow_up()`）—— 原版 `prompt()` 已用 `streaming_behavior` 区分，Rust harness 已有 `steer`/`follow_up` 队列
+- 历史记录（持久化到 `~/.tau/history`）、行内自动补全（工具名 + 斜杠命令）
+- 斜杠命令已落地（`commands.rs`：`/help` `/exit` `/clear` `/compact` `/model` `/provider`），REPL 仅需接上 rustyline 的 command 补全
+- thinking level 切换：原版 `set_thinking_level` / `cycle_thinking_level`；catalog 已含 `thinking_levels`/`thinking_parameter`，需在 REPL 暴露 `/thinking` 并把 `thinking_level` 透传到 `StreamRequest`（当前 `StreamRequest` 无 thinking 字段 → **架构改动点**）
+
+### 6.2 模块草图
+```
+tau-cli/src/repl/
+  mod.rs          # rustyline Editor 封装，输出重定向到 renderer
+  commands.rs     # 复用 tau-coding::commands
+  history.rs      # 历史持久化
+```
+`CodingSession` 已提供 `prompt() -> Stream`（5.1）、`cancel()`（5.2 中断修复）、`set_model`/`set_provider`（5.4），REPL 只做 I/O 编排，不触碰协议。
+
+### 6.3 架构改动点（需先决）
+- `StreamRequest`（`tau-agent`）增加 `thinking_level: Option<&str>`，由 provider 适配层翻译为 catalog 的 `thinking_parameter`（如 `reasoning_effort`）——原版 `ThinkingLevel` 枚举 + `_sync_thinking_level_to_active_model` 逻辑需复刻到 `tau-coding::thinking`（原版 `thinking.py` 约 200 行）。
+- 当前 `CodingSession::set_model`/`set_provider` 仅改内存（issue #16 推迟）；REPL 的 `/model` `/provider` 切换应按原版 `_persist_default_model_choice` 落盘 `providers.json` 偏好 + 追加 `ModelChangeEntry`/`ThinkingLevelChangeEntry`。
+
+## Phase 7 — ratatui TUI（可裁剪，待实现）
+原版 TUI 是 **6070 行** `tui/app.py` + `adapter.py`（纯 `apply(event)`）+ `state.py` + `widgets.py` + `autocomplete.py`。这是重写成本最高、收益最外围的一块，建议严格按"纯 adapter 先行"策略。
+
+### 7.1 移植顺序（对齐原版分层：`TuiEventAdapter.apply` 是纯函数，最易移植）
+1. **`TuiState` + `apply(&mut TuiState, &CodingSessionEvent)`**：先把原版 `adapter.py` 的 `apply` 逐事件翻译为 Rust 纯函数（无 ratatui 依赖，可单测）。事件源 = `CodingSession::prompt()` 产出的 `AgentEvent`，经 `EventRenderer` 同款管线。
+2. **最小布局**：transcript（滚动消息区）+ prompt 输入行（复用 Phase 6 的 rustyline 或 `tui-textarea`）。
+3. **pickers**：model picker（`available_model_choices`）、session tree picker（`tree_choices`）、thinking picker—— 全部由 `CodingSession` 已暴露的只读 getter 驱动。
+4. **autocomplete / sidebar / 主题**：最后做。
+
+### 7.2 关键约束（来自原版 AGENTS.md）
+> Do not let Textual become a dependency of the reusable agent harness.
+
+Rust 等同约束：**ratatui 只依赖 `tau-types` 事件 + `CodingSession` 只读接口，绝不反向依赖 `tau-agent`/`tau-ai` 的 HTTP**。建议放 `tau-cli` 内的 `feature = "tui"`，默认不编译，保持二进制体积与无 TUI 依赖。
+
+## Phase 8 — 补齐与再评估（待实现）
+| 能力 | 原版位置 | Rust 现状 | 建议 |
+|------|----------|-----------|------|
+| OAuth 交互流 | `oauth*.py`（device/PKCE + localhost server） | 无 | 加 `tau-coding::credentials::oauth`（webbrowser + 微型 axum server + jsonwebtoken）；`providers.json` 已留 `auth_methods` |
+| openai-codex provider | `tau_ai/openai_codex.py` (848 行) | catalog 有条目，无适配 | 实现 `OpenAICodexProvider`（OAuth bearer + `backend-api` 端点） |
+| google / mistral 适配器 | `google.py`/`mistral.py` | 无 | 复用 `OpenAICompatibleProvider` + catalog `kind` 分流；thinking 映射已在 catalog |
+| Anthropic responses API | — | 仅 messages API | 按 catalog `api = "anthropic-messages"` 已区分，按需加 responses |
+| skills / 项目 context 文件 | `skills.py`/`context.py` | 无 | `CodingSession` 当前无 `skills()`/`context_files()` getter；system prompt 组装器（`prompt.rs`）需接 `prompt_templates`/`resources` |
+| session HTML 导出 | `session_export.py` | `export()` 占位 | 用 `syntect` 高亮，复用 transcript 渲染 |
+| 扩展系统 | `extensions/`（动态加载 2.3k 行） | 静态 `NoopExtensionRuntime` | v1 砍除；再评估用 rhai/WASM/子进程 IPC（原版 `ExtensionAPI.setup(tau)` 接缝已以 trait 边界保留） |
+| update_check | `update_check.py` | 无 | 低优先，可 `reqwest` 轮询 GitHub release |
+
+### 8.1 与原版的功能差距（架构层面）
+原版 `CodingSession` 是 **2662 行**组合根，暴露 ~80 个方法（model scoping、provoder runtime 刷新、skills、context files、branch、reload、diagnostics、session stats、export）。Rust 当前 `coding_session.rs`（807 行）覆盖了核心路径（prompt/load/resume/compaction/naming/repair/commands 接线），但以下**原版能力尚未移植**：
+- `branch_to_entry` / `SessionTreeBranchResult`（分支浏览与切换）—— 底层 `SessionState` 树遍历（`tree.rs`）已具备，缺 CLI 暴露
+- `skills` / `context_files` / `prompt_templates` / `resources`（系统提示工程素材）
+- `reload` / `reload_provider_settings`（热重载扩展与 provider 配置）
+- `session_stats` / `resource_diagnostics`（遥测/诊断）
+- `export`（HTML/JSON 导出）
+- `set_thinking_level` / thinking 枚举（见 Phase 6.3）
+
+这些不是阻塞项——核心 agent 循环、工具、持久化、兼容、真实 API 跑通已全部到位。Phase 8 是"广度"而非"正确性"工作。
+
+---
+
+
 
 ---
 
@@ -504,13 +567,16 @@ OAuth 交互流、openai-codex provider、google/mistral 适配器、responses A
 | 4 | `tau-coding` | `session/storage.rs` | `JsonlSessionStorage`：session 文件读写 | ✅ 已完成 |
 | 4 | `tau-coding` | `session/manager.rs` | `SessionManager`：session 目录管理 | ✅ 已完成 |
 | 4 | `tau-coding` | `config/catalog.rs` | catalog 深度合并 | ✅ 已完成 |
-| 5 | `tau-coding` | `session/coding_session.rs` | 组合根骨架：context-window 估算、compaction 基础、system prompt 组装 | 🚧 骨架已实现 |
-| 5 | `tau-coding` | `session/compaction.rs` | compaction 基础逻辑 | 🚧 骨架已实现 |
-| 5 | `tau-coding` | `session/context_window.rs` | context-window token 估算 | 🚧 骨架已实现 |
-| 5 | `tau-coding` | `prompt.rs` | system prompt 组装器 | 🚧 骨架已实现 |
-| 5 | `tau-coding` | `commands/` | 斜杠命令注册表 | ⏳ 待设计 |
-| 6 | `tau-cli` | `repl/` | rustyline、历史记录、自动补全 | ⏳ 待设计 |
-| 7 | `tau-cli` | `tui/` | ratatui 全量终端 UI | ⏳ 待设计 |
+| 5 | `tau-coding` | `session/coding_session.rs` | 组合根：prompt/load/resume/compaction/命名/repair/命令接线（5.1-5.4） | ✅ 已完成 |
+| 5 | `tau-coding` | `session/compaction.rs` | compaction 三触发（阈值/手动/溢出+重试）+ LLM 摘要（5.3） | ✅ 已完成 |
+| 5 | `tau-coding` | `session/context_window.rs` | context-window token 估算（5.3） | ✅ 已完成 |
+| 5 | `tau-coding` | `prompt.rs` | system prompt 组装器（5.4） | ✅ 已完成 |
+| 5 | `tau-coding` | `naming.rs` / `commands.rs` / `shell_escape.rs` | 自动命名 / 斜杠命令 / `!` `!!` shell escape（5.4） | ✅ 已完成 |
+| 5 | `tau-coding` | `session/repair.rs` | 中断 tool_call 修复（in-memory，5.2） | ✅ 已完成 |
+| 5 | `tau-cli` | `render/mod.rs` | 三渲染器 plain/json/transcript + `EventRenderer` trait（5.5） | ✅ 已完成 |
+| 5 | `tau-cli` | `main.rs` | print/REPL/resume 全模式 + `--format` + 429 退避（5.1-5.8） | ✅ 已完成 |
+| 6 | `tau-cli` | `repl/` | rustyline、历史记录、自动补全、thinking 切换 | ⏳ 待实现（见 §4 Phase 6） |
+| 7 | `tau-cli` | `tui/` | ratatui 全量终端 UI（纯 adapter 先行） | ⏳ 待实现（见 §4 Phase 7） |
 
 ## 6.4 测试覆盖
 
@@ -531,32 +597,33 @@ Phase 4 测试已全部落地（storage 4 + manager 6 + catalog 3 = 13 测试，
 
 | Provider | 类型 | 默认模型 | 状态 |
 |----------|------|----------|------|
-| OpenCode | `openai-compatible` | `deepseek-v4-flash-free` | ✅ 已验证 |
+| OpenCode | `openai-compatible` | `nemotron-3-ultra-free` | ✅ 真实 API 验证（5.7/5.8） |
 | NVIDIA NIM | `openai-compatible` | `deepseek-ai/deepseek-v4-flash` | ✅ 已验证 |
 | DeepSeek | `openai-compatible` | `deepseek-v4-flash` | ✅ 已配置 |
 | Anthropic | `anthropic` | `claude-sonnet-4` | ✅ 代码完成 |
 | OpenAI | `openai` | `gpt-4o` | ✅ 代码完成 |
 
-## 6.6 待实现模块（Phase 5+）
+## 6.6 待实现模块（Phase 6+，按广度排序，非阻塞）
 
-| Phase | 模块 | 说明 | 状态 |
-|-------|------|------|------|
-| 3 | `tau-coding` crate | 新建 crate，包含工具和 session 模块 | ✅ 已完成 |
-| 3 | `tools/` | `read`/`write`/`edit`/`bash` 四个核心工具 | ✅ 已完成 |
-| 4 | `session/storage.rs` | `JsonlSessionStorage`：session 文件读写 | ✅ 已完成 |
-| 4 | `session/manager.rs` | `SessionManager`：session 目录管理 | ✅ 已完成 |
-| 4 | `config/catalog.rs` | catalog 深度合并 | ✅ 已完成 |
-| 5 | `session/coding_session.rs` | 组合根骨架：context-window、compaction、system prompt | 🚧 骨架已实现 |
-| 5 | `session/compaction.rs` | compaction 基础逻辑 | 🚧 骨架已实现 |
-| 5 | `session/context_window.rs` | context-window token 估算 | 🚧 骨架已实现 |
-| 5 | `prompt.rs` | system prompt 组装器 | 🚧 骨架已实现 |
-| 5 | 命令系统 | 斜杠命令注册表 | ⏳ 待设计 |
-| 6 | 高级 REPL | rustyline、历史记录、自动补全 | ⏳ 待设计 |
-| 7 | ratatui TUI | 全量终端 UI | ⏳ 待设计 |
-| 8 | OAuth | 浏览器 OAuth 流程 | ⏳ 待设计 |
-| 8 | 扩展系统 | 动态插件加载（WASM/rhai/子进程 IPC） | ⏳ 待设计 |
+> 核心正确性（agent 循环、工具、持久化、兼容、真实 API）已全部到位。下表中"原版缺口"指相对 `huggingface/tau` 原版 `CodingSession`（2662 行）尚未移植的能力，多数为"广度"工作。
 
-## 6.5 与 Python 原版的关键差异
+| Phase | 模块 | 原版对应 | 状态 |
+|-------|------|----------|------|
+| 6 | `tau-cli/src/repl/` | `cli.py::run_print_mode` / `run_openai_print_mode` 交互分支 | ⏳ 待实现 |
+| 6 | thinking level 切换 | `session.py::set_thinking_level` / `thinking.py` | ⏳ 待实现（需 `StreamRequest` 加 thinking 字段） |
+| 7 | `tau-cli/src/tui/` | `tui/app.py` (6070) + `adapter.py`(纯) + `state.py` | ⏳ 待实现（纯 adapter 先行） |
+| 8 | `credentials::oauth` | `oauth*.py`（device/PKCE） | ⏳ 待实现 |
+| 8 | `OpenAICodexProvider` | `tau_ai/openai_codex.py` | ⏳ 待实现 |
+| 8 | google / mistral 适配器 | `google.py` / `mistral.py` | ⏳ 待实现（catalog `kind` 已分流） |
+| 8 | skills / context_files / prompt_templates / resources | `skills.py` / `context.py` | ⏳ 待实现 |
+| 8 | `branch_to_entry` / `SessionTreeBranchResult` | `session.py` 分支浏览 | ⏳ 待实现（底层树遍历已具备） |
+| 8 | `reload` / `reload_provider_settings` | `session.py::reload` | ⏳ 待实现 |
+| 8 | `session_stats` / `resource_diagnostics` | `session.py` 遥测 | ⏳ 待实现 |
+| 8 | `export`（HTML/JSON） | `session_export.py` | ⏳ 待实现（用 `syntect`） |
+| 8 | 扩展系统 | `extensions/`（动态加载 2.3k） | ⏳ v1 砍除，再评估 rhai/WASM/IPC |
+| 8 | `update_check` | `update_check.py` | ⏳ 低优先 |
+
+## 6.7 与 Python 原版的关键差异
 
 | 维度 | Python | Rust | 影响 |
 |------|--------|------|------|
@@ -565,3 +632,98 @@ Phase 4 测试已全部落地（storage 4 + manager 6 + catalog 3 = 13 测试，
 | 异步模型 | async generator | `impl Stream` | 语义等价 |
 | 错误处理 | exceptions | `Result` + `thiserror` | 更严格 |
 | 并发 | GIL + threading | 真并行 | 性能提升 |
+
+---
+
+# 7. 架构深度剖析：Rust 重写 vs Python 原版
+
+> 本节基于对 `huggingface/tau` 原版（Phase 8 之前）三包**全部核心源码**的通读，与 `tau-rs` 当前（Phase 5.8）实现的逐层比对。目标不是逐文件对照，而是**在架构原则层面**说明：哪些被忠实战留、哪些被有意改进、哪些被推迟、以及为什么。
+
+## 7.1 分层与依赖方向（核心原则被严格执行）
+
+原版 `AGENTS.md` 明确三条铁律：
+
+```
+AgentHarness = 可复用的 agent 大脑
+AgentSession = 编码 agent 环境
+TUI          = 一种可能的前端
+```
+
+且 **TUI 不得成为可复用 harness 的依赖**。Rust 用 **cargo crate 边界**把这个约定从"文档纪律"升级为"编译器强制"：
+
+| 原版（约定） | Rust（强制） | 评估 |
+|---|---|---|
+| `tau_agent` 拥有 `ModelProvider` Protocol，`tau_ai` 只是实现方 | `tau-agent` 定义 trait，`tau-ai` 依赖它；`tau-agent` 不依赖 `tau-ai`/reqwest | ✅ 完全一致，且更强 |
+| `tau_coding` 组合 `tau_agent` + `tau_ai` | `tau-coding` 依赖两者，`tau-cli` 依赖 `tau-coding` | ✅ 一致 |
+| `CodingSession` 是组合根，缝 harness+工具+持久化+扩展 | `CodingSession`（`tau-coding`）同职责 | ✅ 一致（见 7.3） |
+| Textual 不能反向依赖 harness | ratatui 只依赖 `tau-types` 事件 + `CodingSession` 只读接口，置于 `feature="tui"` | ✅ 一致（Phase 7 落地时） |
+
+**结论**：分层是重写中最忠实、也最成功的部分。crate 图与原文 §2.1 设计完全一致，且 Rust 的编译期保证消除了 Python 里"某天有人 import 错方向"的风险。
+
+## 7.2 数据流与控制流（语义完整保留）
+
+原版的"拉取式流"（async generator，消费速度由下游决定，取消 = generator close）是 Pi 架构的灵魂。Rust 用 `async-stream::stream!` + `BoxStream` + `Drop` 语义完整复刻：
+
+- **下行**：provider SSE 字节 → `ProviderEvent`（`tau-ai::stream` canonicalizer）→ `AssistantMessageEvent` → `run_agent_loop` 包成 `AgentEvent` → `CodingSession` 持久化副作用 → renderer。`tau-ai/src/stream.rs`（440 行）对应原版 `tau_ai/stream.py` 的 `canonicalize_provider_stream`，职责一致。
+- **上行取消**：原版在 SSE 循环 / 工具轮询 / 重试等待三处轮询 token（每 50ms）；Rust 三处均用 `tokio::select! { _ = token.cancelled() => ... }`，行为等价且**即时**（无 50ms 轮询延迟）。`harness.cancel()` 已就绪。
+- **steer / follow_up**：原版 `prompt(streaming_behavior=...)` 在运行中入队；Rust `AgentHarness::steer()/follow_up()` 同为 `&self`、经共享 `Arc<HarnessState>` 队列，在循环边界排空——与原文 §2.5 ADR 一致。
+
+**改进点**：原版 `harness` 对象同时是"流源"和"控制面板"（同一对象别名），Rust 改为 `Arc<HarnessState>` 共享，使 `prompt()` 返回 `'static` 流而 `steer/cancel` 仍可并发调用——更安全的等价物（原文 §2.5 已记录此 ADR）。
+
+## 7.3 CodingSession：组合根的规模差距（最关键的"广度"差距）
+
+原版 `session.py` 是 **2662 行、~80 个公开方法**的巨型组合根；Rust `coding_session.rs` 当前 **807 行**，覆盖核心路径但方法数远少于原版。这不是架构错误，而是**功能广度**的差距，集中在原版承担的"应用环境"职责：
+
+| 原版 `CodingSession` 能力 | Rust 状态 | 说明 |
+|---|---|---|
+| `prompt()`（含 input hooks / prompt 展开 / pre-auto-compact / overflow 重试 / 自动命名副作用） | ✅ 核心路径已实现 | 5.1-5.4 覆盖；缺 input hooks（扩展运行时）与 prompt 模板展开 |
+| `load()` / `branch_to_entry` / `resume` | ✅ `load`/`resume` 已实现；`branch_to_entry` ⏳ | 底层 `SessionState` 树遍历（`tree.rs`）已具备，缺 CLI 暴露 |
+| `set_model` / `set_provider` / `set_thinking_level` / model scoping | 🟡 内存切换已实现（5.4），**持久化 + thinking 待做** | issue #16 推迟；thinking 需 `StreamRequest` 加字段（见 Phase 6.3） |
+| `compact_now` / `_try_auto_compact` / `_try_overflow_compact` / `_generate_compaction_summary` | ✅ 三触发 + LLM 摘要已实现（5.3） | 与原版对齐 |
+| `_ensure_session_initialized` / `_append_session_entry`（parent_id 链、index） | ✅ 已实现（5.1-5.2） | 双向兼容已锁（5.6） |
+| `skills()` / `context_files()` / `prompt_templates()` / `resources()` | ⏳ 未移植 | 系统提示工程素材缺位，`prompt.rs` 当前只用工具片段 |
+| `reload()` / `reload_provider_settings()` | ⏳ 未移植 | 热重载扩展/provider 配置 |
+| `session_stats` / `resource_diagnostics` | ⏳ 未移植 | 遥测/诊断 |
+| `export()`（HTML/JSON） | 🟡 占位 | 待 `syntect` 高亮 |
+| `command_registry` / `extension_runtime` | 🟡 命令已落地（`commands.rs`）；扩展为 `NoopExtensionRuntime` | 动态加载 v1 砍除 |
+
+**深度剖析结论**：Rust 重写把"能跑通一次真实编码任务"所需的最小组合根做完了（且经过真实 API 验证），但原版围绕 `CodingSession` 构建的**全部应用层便利功能**（skills、context 文件、分支 UI、热重载、导出、诊断、扩展）尚未移植。这些属于 Phase 8 的"广度"工作，不影响核心正确性。
+
+## 7.4 Provider 适配层：从"多文件"到"两适配器 + catalog 驱动"
+
+原版 `tau_ai` 有 `anthropic.py` / `openai_compatible.py`(1126) / `openai_codex.py`(848) / `google.py` / `mistral.py` / `stream.py` / `retry.py`。Rust 当前只有 **`anthropic.rs` + `openai.rs`**（均 ~520 行）+ `stream.rs` + `retry.rs` + `sse.rs`。
+
+- **收敛理由**：catalog.toml 已把 28+ provider 归并为少量 `kind`（`openai-compatible` / `anthropic` / `openai-responses` / `google-generative-ai` 等），绝大多数 OpenAI 兼容端点共用 `OpenAICompatibleProvider`。这是**比原版更优的抽象**——原版为 codex/google/mistral 各写一份 ~450-850 行适配器，Rust 用 catalog `kind` + `api` 字段分流，避免重复。
+- **待补**：`openai_codex`（OAuth bearer + `backend-api`）、`google`/`mistral` 的 thinking 映射（catalog 已含 `thinking_parameter`/`thinking_level_map`，适配器侧需翻译）。这部分是 Phase 8 的"多 provider 广度"。
+
+## 7.5 错误处理哲学：协议内错误是数据，不是异常（完全一致）
+
+原版核心认知："tau 协议中错误大多是数据而不是异常"——`AssistantMessage{stop_reason:Error}`、`ToolResultMessage{is_error:true}`、`AssistantErrorEvent` 都不进异常。Rust 完全继承：
+- 协议错误保持为数据（`StopReason::Error` / `is_error` / `AssistantMessageEvent::Error`）。
+- 库错误用 `thiserror`（`SessionJsonlError` 带行号、`ToolError`）。
+- 工具边界 `Result<AgentToolResult, ToolError>` 被 loop 捕获转 error result（对应 Python `except Exception` 隔离）。
+- 永不 panic：坏 session 行 → 带行号错误；diagnostics 日志永不失败。
+
+**这是两个实现最高度一致的设计决策之一**，Rust 的类型系统还额外强化了"协议错误不进 Result"的不可绕过性。
+
+## 7.6 真实验证暴露的、原版文档未写明的隐患（Rust 已修复）
+
+通过真实 OpenCode 免费模型端到端测试（5.7/5.8），发现两个原版架构文档未提及、但会影响任何实现的缺陷，已先在 Rust 修：
+
+1. **`model:"unknown"` 持久化丢失**（#17）：流式聚合时 `ResponseEnd` 的 `AssistantMessage` 未回填解析到的 `model`，导致落盘的 `message_end`/`turn_end` 丢掉模型名。原版若用同样的"流式 update 携带 model、end 重建消息"模式，也可能有同类隐患。Rust 已用 `resolved_model` 跟踪修复。
+2. **429 与 5xx 同退避**（#19→5.8）：免费 tier 冷启 429 在 2 次通用重试内耗尽。Rust 现用 429 专用退避（base 2s、honor `Retry-After`、cap 60s）+ 默认 `max_retries` 5。原版 `retry.py` 虽也区分状态码，但免费 tier 的特定限流窗口（返回 `Retry-After: 56352` 即 15.7h 账号级封锁）需要"钳制上限 + 优雅失败"的处理，这是 Rust 实测后才明确的。
+
+## 7.7 总体评估
+
+| 维度 | 评价 |
+|---|---|
+| 分层 / 依赖方向 | ⭐ 忠实且更强（编译期强制） |
+| 流语义（拉取式 / 取消 / steer） | ⭐ 完整保留，取消更即时 |
+| 错误模型 | ⭐ 完全一致且更严格 |
+| Wire 兼容 | ⭐ 双向 golden 锁定（5.6） |
+| 真实可用性 | ⭐ 已端到端跑通真实编码任务（5.7/5.8） |
+| 组合根广度 | 🟡 核心路径完成，~80 方法中的"环境便利功能"待 Phase 8 |
+| Provider 广度 | 🟡 2 适配器 + catalog 驱动，多 provider/OAuth 待 Phase 8 |
+| TUI | ⏳ 纯文本 + 三渲染器就绪，ratatui 待 Phase 7 |
+
+**一句话**：Rust 重写在"架构骨架 + 核心正确性 + 真实可跑"层面已全面达到并局部超越原版；剩余工作是原版 `CodingSession` 那 2662 行里大量的**应用层便利功能**与 **TUI/多 provider 广度**，属于可增量、非阻塞的 Phase 6-8。
