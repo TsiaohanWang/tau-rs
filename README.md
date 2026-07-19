@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-193%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-200%20passing-brightgreen)](#testing)
 
 ---
 
@@ -702,7 +702,7 @@ export DEEPSEEK_API_KEY="sk-..."
 
 ### Testing Strategy
 
-The test suite includes **193 tests** (default) / **198** with `--features tui` across unit, integration, and wiremock levels:
+The test suite includes **200 tests** (default) / **205** with `--features tui` across unit, integration, and wiremock levels:
 
 | Crate | Unit Tests | Integration Tests | Total |
 |---|---|---|---|
@@ -713,7 +713,7 @@ The test suite includes **193 tests** (default) / **198** with `--features tui` 
 | `tau-cli` | 11 (render module + subprocess CLI tests + REPL completion + TUI) | 9 (subprocess CLI tests) | 20 |
 | **Total** | **151** | **41** | **192** |
 
-> 测试总数以 `cargo test --workspace` 实时结果为准（默认 **193** / `--features tui` **198**）；上表为分类快照。
+> 测试总数以 `cargo test --workspace` 实时结果为准（默认 **200** / `--features tui` **205**，含 `tau-types` 新增 7 个 hand-written `Deserialize` proptest 性质测试）；上表为分类快照。
 
 **Integration test patterns**:
 - `tau-ai` tests use [wiremock](https://github.com/LukeMathWalker/wiremock-rs) to mock HTTP responses and verify SSE parsing + retry behavior

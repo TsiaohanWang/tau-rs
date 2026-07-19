@@ -214,3 +214,20 @@ Ctrl-D / /exit  退出
 - **crossterm 同步键事件与 tokio async 的桥接**：用 `spawn_blocking` + `mpsc` channel，主循环 `select!` 键 channel 与 prompt 流；回退方案是直接用 `crossterm` 在单线程 `block_on` 内轮询（功能等价，仅并发度低）。
 - **ratatui 版本漂移**：锁定 `ratatui` 0.29 / `crossterm` 0.28（当前稳定），API 相对稳定；若破坏性变更，pin 版本。
 - **TUI 不反向依赖 harness HTTP**：通过仅暴露 `CodingSession` 只读方法 + `AgentEvent` 流保证；CI 可加 `cargo tree --features tui` 目检不引入非预期 HTTP 抽象（ratatui 本身无网络依赖）。
+
+---
+
+## 实施后修复记录（2026-07-19）
+
+初始实现中发现的 6 个 bug 已全部修复，详见 [`docs/tui-fixes.md`](tui-fixes.md)：
+
+| # | 问题 | 修复提交 |
+|---|------|----------|
+| 1 | 输入框不清空/退格无效/重复发送/无法滚动 | `b1e36ad` |
+| 2 | 光标不可见 + 光标位置偏差（Unicode prompt） | `347a723` |
+| 3 | 光标狂晃（终端 cursor vs ratatui）+ 退格 Unicode panic | `b169503` |
+| 4 | Assistant 消息重复 + Delete 键缺失 | `53e154b` |
+| 4.5 | 发送后输入框不清空（命令/shell 后错误启动流） | `262bc93` |
+| 5 | 彻底修复重复 + 光标残留 + 输入不清空（空 span 渲染问题） | `7f8ddf2` |
+
+最终状态：200（默认）/ 205（--features tui）测试全绿，TUI 可用。

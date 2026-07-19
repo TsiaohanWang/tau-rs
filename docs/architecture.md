@@ -4,7 +4,7 @@
 
 本文件是 huggingface/tau（Python）到 Rust 重写的总体架构设计与全套迁移计划。它基于对原项目三个包（`tau_ai` ≈4.1k 行、`tau_agent` ≈1.7k 行、`tau_coding` ≈25.7k 行）全部核心源码的通读产出。
 
-> **当前状态**: Phase 1-7 全部完成（含 5.1-5.8、6 REPL、7 ratatui TUI）。测试全绿：默认 **193**、`--features tui` **198**（TUI 测试仅在 `tui` feature 下编译）；clippy 与 `fmt` 干净（TUI 置于 `feature = "tui"`，默认不编译）。已用真实 OpenCode 免费模型端到端验证（LRU crate 10/10、resume 18/18、429 退避、wire 双向兼容 golden）。剩余为 Phase 8（OAuth / 更多 provider / skills / 扩展）。详见文末 §6 与 §4。
+> **当前状态**: Phase 1-7 全部完成（含 5.1-5.8、6 REPL、7 ratatui TUI）。测试全绿：默认 **200**、`--features tui` **205**（TUI 测试仅在 `tui` feature 下编译）；clippy 与 `fmt` 干净（TUI 置于 `feature = "tui"`，默认不编译）。已用真实 OpenCode 免费模型端到端验证（LRU crate 10/10、resume 18/18、429 退避、wire 双向兼容 golden）。TUI 经 5 轮 bug 修复（重复消息、光标 Unicode panic、输入不清空、滚动），已达可用状态。剩余为 Phase 8（OAuth / 更多 provider / skills / 扩展）。详见文末 §6 与 §4。
 
 范围决策（已确认）：
 
@@ -586,18 +586,18 @@ Rust 等同约束：**ratatui 只依赖 `tau-types` 事件 + `CodingSession` 只
 
 ## 6.4 测试覆盖
 
-> 下表为分类快照；**权威测试总数以 `cargo test --workspace` 实时结果为准**（默认 193 / `--features tui` 198）。随 Phase 迭代各 crate 计数会增长。
+> 下表为分类快照；**权威测试总数以 `cargo test --workspace` 实时结果为准**（默认 **200** / `--features tui` **205**）。随 Phase 迭代各 crate 计数会增长。`tau-types` 新增 7 个 hand-written `Deserialize` proptest 性质测试（见 `docs/review-2026-07-19-2.md` §4）。
 
 | Crate | 单元测试 | 集成测试 | 总计（快照） |
 |-------|---------|---------|------|
-| `tau-types` | 4 | — | 4 |
+| `tau-types` | 11 | — | 11 |
 | `tau-agent` | 10 | 11 | 21 |
 | `tau-ai` | 26 | 10 | 36 |
 | `tau-cli` | 11 | 10 | 21 |
 | `tau-coding` | 100 | 10 | 110 |
-| **总计（快照）** | **151** | **41** | **192** |
+| **总计（快照）** | **158** | **41** | **199** |
 
-> 注：快照总计 192 ≈ 实时 193 的差异来自 bin 集成测试归类的统计方式；以 `cargo test --workspace` 输出为准。Phase 4 的 storage/manager/catalog 单测实际为 6/7/8。
+> 注：快照总计 199 ≈ 实时 200 的差异来自 doc-test 的统计方式；以 `cargo test --workspace` 输出为准。
 
 ### 待实现测试（Phase 4 → 已完成）
 
