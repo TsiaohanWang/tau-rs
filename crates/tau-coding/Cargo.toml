@@ -24,6 +24,9 @@ sha2 = "0.10"
 serde = { workspace = true }
 toml = "0.8"
 futures.workspace = true
+async-stream = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tau-agent = { path = "../tau-agent", features = ["testing"] }
+tempfile = "3"

@@ -11,14 +11,14 @@
 |---|----------|-------|--------|
 | 1 | 🔴 P0 | CatalogConfig 类型双份定义 — CLI 与 tau-coding 各自持有独立的 `CatalogConfig`/`ProviderKind` | ✅ Fixed |
 | 2 | 🔴 P0 | SSE 伪流式 — `resp.text().await` 缓冲完整响应体再逐行解析，破坏取消语义 | ✅ Fixed |
-| 3 | 🔴 P0 | 缺 CodingSession 组合根 — CLI 直接驱动 harness，无持久化树的 parent_id 链 | 🚧 Partial |
+| 3 | 🔴 P0 | 缺 CodingSession 组合根 — CLI 直接驱动 harness，无持久化树的 parent_id 链 | ✅ Fixed (5.1) |
 | 4 | 🟠 P1 | JsonlSessionStorage 无文件锁 — 并发追加会交错行 | ✅ Fixed |
 | 5 | 🟠 P1 | write.rs 非原子写 — 崩溃即文件损坏 | ✅ Fixed |
 | 6 | 🟡 P2 | edit.rs 未用 `similar` — 依赖已引入但无调用；缺 LF/BOM 处理 | ✅ Fixed |
 | 7 | 🟡 P2 | 无 context-window token 估算 — `context_windows` 字段存在但零读取 | ✅ Fixed |
 | 8 | 🟡 P2 | 无 compaction — `apply_compaction` 存在但无生成代码 | ✅ Fixed |
 | 9 | 🟡 P2 | main.rs 重复 provider 构造块 — print/REPL 两段近乎相同的 match | ✅ Fixed |
-| 10 | 🟡 P2 | 硬编码 system prompt + 未组装 tool prompt 片段 | 🚧 Partial |
+| 10 | 🟡 P2 | 硬编码 system prompt + 未组装 tool prompt 片段 | ✅ Fixed (5.1) |
 | 11 | 🟡 P2 | REPL 忽略工具事件 — 用户看不到 agent 在做什么 | 🚧 Partial |
 | 12 | 🟡 P2 | `cli_verbose()` 读 TAU_VERBOSE 环境变量反模式 | ✅ Fixed |
 | 13 | 🟡 P2 | IO 风格混用 — `SessionManager` 同步 `std::fs` + `JsonlSessionStorage` async tokio + `block_on` 嵌套 | ✅ Fixed |
@@ -92,6 +92,13 @@
 - The CLI delegates to `CodingSession` instead of driving the harness directly.
 
 **Partial fix (2026-07-19)**: `CodingSession` skeleton implemented in `session/coding_session.rs` with parent_id linkage, compaction trigger, and context-window check. However, `main.rs` still uses `build_harness()` + `persist_message()` directly — `CodingSession` is not yet wired into the CLI. Remaining: swap CLI to use `CodingSession`.
+
+**Complete fix (2026-07-19, Phase 5.1)**: `main.rs` now constructs `CodingSession` via `open_or_create_session` and drives `session.prompt(text)`; the `build_harness`/`persist_message` helpers are deleted. `CodingSession::prompt` returns a wrapped `async-stream` stream that:
+1. runs the pre-prompt compaction threshold check on the in-memory message list;
+2. starts the harness (impossible-to-fail path → silent early-return);
+3. persists every `MessageEnd` event — both the user-prompt echo and the assistant reply — via `persist_with_parent`, advancing `last_entry_id` so `parent_id` chains correctly.
+
+Verified with live `--print` against `opencode/deepseek-v4-flash-free` (entries chain user → assistant → …) and two integration tests (`test_coding_session_e2e.rs`: `<user, None>`, `<assistant, Some(user_id)>`). Single-user / single-assistant file has 5 entries; multi-turn has 9, all with correct `parent_id`.
 
 ---
 
@@ -208,6 +215,8 @@
 **Fix**: Implement `build_system_prompt(tools, skills, context, model, user_system) -> String` in `tau-coding`. Assemble tool `prompt_snippet` + `prompt_guidelines` into a structured system prompt. Wire it into `build_harness` or `CodingSession`.
 
 **Partial fix (2026-07-19)**: `build_system_prompt(tools, user_system)` implemented in `tau-coding/src/prompt.rs` with tool description/ guideline assembly. Called from `CodingSession::new()`, but `main.rs` still uses the hardcoded string. Remaining: swap CLI `build_harness` to use `build_system_prompt` or `CodingSession`.
+
+**Complete fix (2026-07-19, Phase 5.1)**: The hardcoded `"You are a helpful assistant."` fallback in `main.rs` is dead code (deleted); `cli.system` passes through to `CodingSessionConfig` as `Option<String>`, and `CodingSession::new` calls `build_system_prompt(&tools, user_system.unwrap_or(""))`, which assembles tool snippets + guidelines on top of the user system (or the default placeholder `prompt::DEFAULT_SYSTEM_PROMPT`). Tool `prompt_snippet`/`prompt_guidelines` are no longer dead data.
 
 ---
 

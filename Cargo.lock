@@ -1604,6 +1604,7 @@ name = "tau-coding"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "async-trait",
  "dirs 5.0.1",
  "futures",

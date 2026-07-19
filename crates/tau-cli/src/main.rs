@@ -1,7 +1,7 @@
 mod config;
 
 use std::io::{self, BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, bail};
@@ -121,9 +121,13 @@ async fn main() -> anyhow::Result<()> {
                     .unwrap_or_else(|| "gpt-4o".to_string())
             });
 
-            let system = cli
-                .system
-                .unwrap_or_else(|| "You are a helpful assistant.".to_string());
+            // System prompt: pass-through as `Option<String>`. The
+            // `CodingSession` builder routes `None` to the default in
+            // `build_system_prompt`, and assembled tool snippets are layered on
+            // top regardless of user system. This wires architecture-issues
+            // #10 — the hard-coded "You are a helpful assistant." fallback is
+            // now dead, replaced by `prompt.rs::DEFAULT_SYSTEM_PROMPT`.
+            let system: Option<String> = cli.system.clone();
 
             let prefs = providers.provider_preferences.get(provider_name);
             let max_retries = prefs.and_then(|p| p.max_retries).unwrap_or(2);
@@ -170,14 +174,14 @@ async fn main() -> anyhow::Result<()> {
             if cli.print {
                 let prompt = prompt_text.context("--print requires a prompt argument")?;
                 let cwd = std::env::current_dir().context("failed to get current directory")?;
-                print_once(model_provider, &system, &prompt, &model, &cwd, &home).await?;
+                print_once(model_provider, system, &prompt, model, &cwd, &home).await?;
             } else {
                 if prompt_text.is_some() {
                     bail!("interactive mode does not accept a prompt; use --print with a prompt");
                 }
                 let cwd = std::env::current_dir().context("failed to get current directory")?;
                 eprintln!("tau-rs ({provider_name}) | type your message (Ctrl-D to exit)");
-                run_repl(model_provider, &system, &model, &cwd, &home, cli.verbose).await?;
+                run_repl(model_provider, system, model, &cwd, &home, cli.verbose).await?;
             }
         }
     }
@@ -297,77 +301,39 @@ fn cmd_config(
 }
 
 // ---------------------------------------------------------------------------
-// Session persistence helpers
+// Session + CodingSession construction
 // ---------------------------------------------------------------------------
 
+/// Open (or create on first run) a session file under `~/.tau/sessions` and
+/// wrap it in a fresh `CodingSession`. The `SessionInfo` entry is written on
+/// this first call; subsequent `--resume` (5.2) will reuse the existing file.
 async fn open_or_create_session(
+    provider: Arc<dyn ModelProvider + Send + Sync>,
+    system: Option<String>,
+    model: String,
+    cwd: PathBuf,
     home: &config::TauHome,
-    project_dir: &Path,
-) -> anyhow::Result<(String, tau_coding::session::JsonlSessionStorage)> {
+) -> anyhow::Result<tau_coding::session::CodingSession> {
     let sessions_dir = home.root.join("sessions");
     let mgr = tau_coding::session::SessionManager::new(sessions_dir);
-    let (path, storage) = mgr.create(project_dir).await?;
-    let session_id = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown")
-        .to_string();
+    let (_path, storage) = mgr.create(&cwd).await?;
 
-    let info = tau_types::SessionEntry::SessionInfo(tau_types::SessionInfoEntry {
-        id: tau_types::message::new_entry_id(),
-        parent_id: None,
-        timestamp: tau_types::current_timestamp_secs(),
-        r#type: tau_types::EntryType::SessionInfo,
-        created_at: tau_types::current_timestamp_secs(),
-        cwd: project_dir.to_str().map(|s| s.to_string()),
-        title: None,
-    });
-    storage.append(&info).await?;
-    Ok((session_id, storage))
-}
-
-async fn persist_message(
-    storage: &tau_coding::session::JsonlSessionStorage,
-    message: tau_types::AgentMessage,
-) -> anyhow::Result<String> {
-    let id = tau_types::message::new_entry_id();
-    let entry = tau_types::SessionEntry::Message(Box::new(tau_types::MessageEntry {
-        id: id.clone(),
-        parent_id: None,
-        timestamp: tau_types::current_timestamp_secs(),
-        r#type: tau_types::EntryType::Message,
-        message,
-    }));
-    storage.append(&entry).await?;
-    storage
-        .append(&tau_types::SessionEntry::Leaf(tau_types::LeafEntry {
-            id: tau_types::message::new_entry_id(),
-            parent_id: None,
-            timestamp: tau_types::current_timestamp_secs(),
-            r#type: tau_types::EntryType::Leaf,
-            entry_id: Some(id.clone()),
-        }))
-        .await?;
-    Ok(id)
-}
-
-fn build_harness(
-    provider: Arc<dyn ModelProvider + Send + Sync>,
-    system: &str,
-    model: &str,
-    cwd: &Path,
-) -> AgentHarness {
-    let tools = tau_coding::tools::create_coding_tools(cwd);
-    AgentHarness::new(AgentHarnessConfig {
+    let cfg = tau_coding::session::CodingSessionConfig {
         provider,
-        model: model.to_string(),
-        system: system.to_string(),
-        tools,
+        model,
+        system,
+        cwd,
+        // context_window + auto-compaction threshold: 5.3 will read the
+        // active model's window from the catalog. For now pass `None` so
+        // the threshold trigger is inactive while the rest of the pipeline
+        // is wired (manual /compact lands in 5.4).
+        context_window: None,
+        compaction_reserve: tau_coding::session::DEFAULT_RESERVE,
         max_turns: Some(20),
-        queue_mode: QueueMode::OneAtATime,
-        before_tool_call: None,
-        after_tool_call: None,
-    })
+    };
+    let mut session = tau_coding::session::CodingSession::new(storage, cfg);
+    session.write_session_info().await?;
+    Ok(session)
 }
 
 // ---------------------------------------------------------------------------
@@ -376,8 +342,8 @@ fn build_harness(
 
 async fn run_repl(
     provider: Arc<dyn ModelProvider + Send + Sync>,
-    system: &str,
-    model: &str,
+    system: Option<String>,
+    model: String,
     cwd: &Path,
     home: &config::TauHome,
     verbose: bool,
@@ -387,12 +353,11 @@ async fn run_repl(
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
-    let harness = build_harness(provider, system, model, cwd);
-
-    let session = open_or_create_session(home, cwd).await?;
-    let (_session_id, storage) = session;
+    let mut session = open_or_create_session(provider, system, model, cwd.to_path_buf(), home)
+        .await
+        .context("opening session")?;
     if verbose {
-        writeln!(out, "session: {}", storage.path().display())?;
+        writeln!(out, "session: {}", session.storage().path().display())?;
     }
 
     loop {
@@ -415,14 +380,11 @@ async fn run_repl(
         write!(out, "Assistant: ")?;
         out.flush()?;
 
-        let _ = persist_message(
-            &storage,
-            tau_types::AgentMessage::User(tau_types::UserMessage::new(line.as_str())),
-        )
-        .await;
-
-        let mut final_assistant: Option<tau_types::AgentMessage> = None;
-        let stream = harness.prompt(&line)?;
+        // `session.prompt` returns a wrapped stream that auto-persists both
+        // the user message (pre-run) and each assistant `MessageEnd` event
+        // (side effect). The old `persist_message` calls are gone — see
+        // architecture-issues.md #3 closure (ADR-P5-2).
+        let stream = session.prompt(line.as_str())?;
         futures::pin_mut!(stream);
         while let Some(event) = stream.next().await {
             match event {
@@ -432,9 +394,6 @@ async fn run_repl(
                         write!(out, "{}", delta.delta)?;
                         out.flush()?;
                     }
-                }
-                AgentEvent::MessageEnd(end) => {
-                    final_assistant = Some(end.message);
                 }
                 AgentEvent::ToolExecutionStart(start) => {
                     eprintln!("[tool: {}]", start.tool_name);
@@ -456,9 +415,6 @@ async fn run_repl(
                 _ => {}
             }
         }
-        if let Some(msg) = final_assistant {
-            let _ = persist_message(&storage, msg).await;
-        }
     }
 
     Ok(())
@@ -470,69 +426,110 @@ async fn run_repl(
 
 async fn print_once(
     provider: Arc<dyn ModelProvider + Send + Sync>,
-    system: &str,
+    system: Option<String>,
     prompt: &str,
-    model: &str,
+    model: String,
     cwd: &Path,
     home: &config::TauHome,
 ) -> anyhow::Result<()> {
-    let harness = build_harness(provider, system, model, cwd);
+    let mut session = match open_or_create_session(
+        provider.clone(),
+        system,
+        model,
+        cwd.to_path_buf(),
+        home,
+    )
+    .await
+    {
+        Ok(s) => Some(s),
+        Err(_) => {
+            // Could not open a session file — fall back to a single-turn
+            // ephemeral harness call so `--print` still produces output for
+            // pipelines.
+            return ephemeral_print(provider, prompt, cwd).await;
+        }
+    };
 
-    let session = open_or_create_session(home, cwd).await.ok();
-    if let Some((_, ref storage)) = session {
-        let _ = persist_message(
-            storage,
-            tau_types::AgentMessage::User(tau_types::UserMessage::new(prompt)),
-        )
-        .await;
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let mut got_content = false;
+
+    // The stream borrows `&mut session`; advance it inside this scope and drop
+    // it before `session` itself does. RAII keeps the borrow chain intact.
+    {
+        let stream = session.as_mut().unwrap().prompt(prompt)?;
+        futures::pin_mut!(stream);
+        while let Some(event) = stream.next().await {
+            match event {
+                AgentEvent::MessageUpdate(update) => {
+                    if let AssistantMessageEvent::TextDelta(delta) = &update.assistant_message_event
+                    {
+                        got_content = true;
+                        write!(out, "{}", delta.delta)?;
+                        out.flush()?;
+                    }
+                }
+                AgentEvent::ToolExecutionStart(start) => {
+                    eprintln!("[tool: {}]", start.tool_name);
+                }
+                AgentEvent::ToolExecutionUpdate(_) => {}
+                AgentEvent::ToolExecutionEnd(end) => {
+                    let preview = end.result.text();
+                    let preview = if preview.len() > 120 {
+                        format!("{}…", &preview[..120])
+                    } else {
+                        preview
+                    };
+                    let status = if end.is_error { " error" } else { "" };
+                    eprintln!("[tool: {}{} → {}]", end.tool_name, status, preview);
+                }
+                AgentEvent::AgentEnd(_) => {
+                    writeln!(out)?;
+                }
+                _ => {}
+            }
+        }
     }
 
+    if !got_content {
+        bail!("no content received from provider (possible rate limit or empty response)");
+    }
+    Ok(())
+}
+
+/// Fallback used when session storage cannot be opened — runs a single-turn
+/// harness call and writes assistant text deltas to stdout. Never persists.
+async fn ephemeral_print(
+    provider: Arc<dyn ModelProvider + Send + Sync>,
+    prompt: &str,
+    cwd: &Path,
+) -> anyhow::Result<()> {
+    let tools = tau_coding::tools::create_coding_tools(cwd);
+    let harness = AgentHarness::new(AgentHarnessConfig {
+        provider,
+        model: String::new(),
+        system: tau_coding::prompt::build_system_prompt(&tools, ""),
+        tools,
+        max_turns: Some(20),
+        queue_mode: QueueMode::OneAtATime,
+        before_tool_call: None,
+        after_tool_call: None,
+    });
     let stream = harness.prompt(prompt)?;
     futures::pin_mut!(stream);
     let stdout = io::stdout();
     let mut out = stdout.lock();
     let mut got_content = false;
-    let mut final_assistant: Option<tau_types::AgentMessage> = None;
 
     while let Some(event) = stream.next().await {
-        match event {
-            AgentEvent::MessageUpdate(update) => {
-                if let AssistantMessageEvent::TextDelta(delta) = &update.assistant_message_event {
-                    got_content = true;
-                    write!(out, "{}", delta.delta)?;
-                    out.flush()?;
-                }
+        if let AgentEvent::MessageUpdate(update) = event {
+            if let AssistantMessageEvent::TextDelta(delta) = &update.assistant_message_event {
+                got_content = true;
+                write!(out, "{}", delta.delta)?;
+                out.flush()?;
             }
-            AgentEvent::MessageEnd(end) => {
-                final_assistant = Some(end.message);
-            }
-            AgentEvent::ToolExecutionStart(start) => {
-                eprintln!("[tool: {}]", start.tool_name);
-            }
-            AgentEvent::ToolExecutionUpdate(_) => {}
-            AgentEvent::ToolExecutionEnd(end) => {
-                let preview = end.result.text();
-                let preview = if preview.len() > 120 {
-                    format!("{}…", &preview[..120])
-                } else {
-                    preview
-                };
-                let status = if end.is_error { " error" } else { "" };
-                eprintln!("[tool: {}{} → {}]", end.tool_name, status, preview);
-            }
-            AgentEvent::AgentEnd(_) => {
-                writeln!(out)?;
-            }
-            _ => {}
         }
     }
-
-    if let Some((_, storage)) = session {
-        if let Some(msg) = final_assistant {
-            let _ = persist_message(&storage, msg).await;
-        }
-    }
-
     if !got_content {
         bail!("no content received from provider (possible rate limit or empty response)");
     }
