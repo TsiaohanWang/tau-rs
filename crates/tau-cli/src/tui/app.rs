@@ -486,7 +486,8 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    terminal.hide_cursor().ok();
+    // Show cursor so the user sees their input position
+    terminal.show_cursor()?;
     terminal.clear()?;
     Ok(terminal)
 }

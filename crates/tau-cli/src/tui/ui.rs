@@ -190,13 +190,14 @@ fn render_item(
 }
 
 fn draw_input(frame: &mut ratatui::Frame<'_>, input: &str, cursor: usize, area: Rect) {
-    let prompt = "› ";
+    let prompt = "> ";
     let text = format!("{}{}", prompt, input);
     let para = Paragraph::new(text)
         .style(Style::default().fg(Color::White))
         .block(Block::default().borders(Borders::ALL).title(" Input "));
     frame.render_widget(para, area);
 
+    // prompt.len() is correct for ASCII "> " (2 bytes = 2 display cols)
     let cx = area.x + 1 + prompt.len() as u16 + cursor as u16;
     if cx < area.x + area.width.saturating_sub(1) {
         frame.set_cursor_position((cx, area.y + 1));
