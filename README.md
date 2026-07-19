@@ -219,9 +219,9 @@ name = "opencode"
 display_name = "OpenCode"
 kind = "openai-compatible"
 base_url = "https://opencode.ai/zen/v1"
-api_key_env = "OPENCODE_API_KEY"
-models = ["deepseek-v4-flash-free", "mimo-v2.5-free", "nemotron-3-ultra-free", "north-mini-code-free"]
-default_model = "deepseek-v4-flash-free"
+api_key_env = "OPENCODE_ZEN_API_KEY"
+models = ["nemotron-3-ultra-free", "north-mini-code-free", "deepseek-v4-flash-free", "mimo-v2.5-free"]
+default_model = "nemotron-3-ultra-free"
 
 [[providers]]
 name = "nvidia-nim"
@@ -242,8 +242,8 @@ Per-provider preferences (default model, retries, timeout):
   "default_provider": "opencode",
   "provider_preferences": {
     "opencode": {
-      "default_model": "deepseek-v4-flash-free",
-      "max_retries": 3,
+      "default_model": "nemotron-3-ultra-free",
+      "max_retries": 5,
       "timeout_seconds": 60
     }
   }
@@ -274,7 +274,7 @@ API keys (permissions: `0600`):
 
 | Provider | Kind | Default Model | Notes |
 |---|---|---|---|
-| **OpenCode** | `openai-compatible` | `deepseek-v4-flash-free` | Free tier only (4 models) |
+| **OpenCode** | `openai-compatible` | `nemotron-3-ultra-free` | Free tier only (4 models) |
 | **NVIDIA NIM** | `openai-compatible` | `deepseek-ai/deepseek-v4-flash` | Free tier with rate limits |
 | **DeepSeek** | `openai-compatible` | `deepseek-v4-flash` | Official DeepSeek API |
 | **OpenAI** | `openai` | `gpt-4o` | Official OpenAI API |
