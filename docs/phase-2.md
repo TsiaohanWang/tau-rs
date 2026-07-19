@@ -47,4 +47,4 @@
 
 ---
 
-> 注：本仓库各 Phase 计划文档（phase-1 ~ phase-7）为撰写时快照。测试权威总数以 `cargo test --workspace` 实时结果为准（默认 193 / `--features tui` 198）；架构状态见 `docs/architecture.md` 文件头。
+> 注：本仓库各 Phase 计划文档（phase-1 ~ phase-7）为撰写时快照。测试权威总数以 `cargo test --workspace` 实时结果为准（默认 200 / `--features tui` 205）；架构状态见 `docs/architecture.md` 文件头。

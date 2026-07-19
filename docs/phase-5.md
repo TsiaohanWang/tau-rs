@@ -31,10 +31,10 @@
 - ❌ OAuth device flow / openai-codex / google / mistral 适配器（Phase 8）
 - ❌ 扩展系统动态加载（Phase 8 再评估 WASM/rhai/IPC）
 - ❌ session HTML 导出 / update_check（Phase 8）
-- ❌ skills + AGENTS.md 发现机制（**延后到 Phase 6** — `build_system_prompt` 已留 `skills` 参数位，v1 仅组装 tools 与 user system，不扫文件）
-- ❌ 分支 `branch_to_entry` / `fork`（Phase 6+ — `LeafSelector::At(id)` 重放路径已可用于只读分支预览，但写分支 UI 推迟）
+- ❌ skills + AGENTS.md 发现机制（**延后到 Phase 8** — `build_system_prompt` 已留 `skills` 参数位，v1 仅组装 tools 与 user system，不扫文件）
+- ❌ 分支 `branch_to_entry` / `fork`（Phase 8 — `LeafSelector::At(id)` 重放路径已可用于只读分支预览，但写分支 UI 推迟）
 
-> 估计代码量：`coding_session.rs` ~181 → ~600 行，新增 `commands.rs` ~200、`render/` ~400、`naming.rs` ~80；`tau-coding` 总计 ~+1300 行；`tau-cli` `main.rs` ~+200 行。Phase 5 后测试预计 +60（→ ~190）。
+> 估计代码量：`coding_session.rs` ~181 → ~600 行，新增 `commands.rs` ~200、`render/` ~400、`naming.rs` ~80；`tau-coding` 总计 ~+1300 行；`tau-cli` `main.rs` ~+200 行。Phase 5 后测试预计 +60（→ ~190；截至 2026-07-19 实际为 200+）。
 
 ---
 
@@ -343,7 +343,7 @@ fn parse_command(line: &str) -> Option<Command> { /* "/…" 前缀 */ }
 
 ## 5. 验收
 
-- [ ] `cargo test --workspace --features tau-agent/testing` 全绿，测试计数更新到当前值（预计 ~190）。
+- [ ] `cargo test --workspace --features tau-agent/testing` 全绿，测试计数更新到当前值（撰写时预计 ~190；实际落地 200+）。
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` 0 警告。
 - [ ] `cargo fmt --check` 通过。
 - [ ] `tau-rs -p "…"` 单次运行成功，落盘 JSONL 每行合法 JSON。

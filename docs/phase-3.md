@@ -333,7 +333,7 @@ while let Some(event) = stream.next().await {
 ## 6. 验收
 
 - [x] `cargo build --workspace` 零警告
-- [x] `cargo test --workspace --features tau-agent/testing` 全绿（130 测试）
+- [x] `cargo test --workspace --features tau-agent/testing` 全绿（撰写时 130 测试；截至 2026-07-19 全仓已 200+ 测试）
 - [x] `tau-coding` 单元测试通过（43 测试）
 - [x] CLI `--print` 模式通过 harness 集成
 - [x] `cargo clippy --workspace --all-targets --features tau-agent/testing -- -D warnings` 通过

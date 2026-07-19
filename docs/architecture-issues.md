@@ -323,6 +323,8 @@ pub enum ToolExecutionMode {
 
 **Fix**: Updated all docs to current 174 count.
 
+> **2026-07-19 更新**: 文档测试计数现已同步至 200（默认）/ 205（`--features tui`），见 `docs/architecture.md` §6.4。
+
 ---
 
 ## Issue #16 — 5.4 遗留：模型/提供方仅内存切 + 标题未回填
@@ -352,6 +354,8 @@ pub enum ToolExecutionMode {
 - **resume 重建**：`CodingSession::load` 加载 Python 风格文件后重建消息并可继续。
 
 测试总数 174 → 180。#3 / #10 / #11 此前已在 5.1 / 5.5 标记 ✅ Fixed，本阶段无需改动。
+
+> **2026-07-19 更新**: 累计测试数已增长至 200（默认）/ 205（`--features tui`）。
 
 ---
 

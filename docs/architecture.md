@@ -449,14 +449,11 @@ reqwest 客户端（代理规整）、手写 SSE 行解析、retry/退避、`can
 - `Enter` = 新 prompt；运行中 `Enter` = **steer**（harness `steer()`）、`Alt+Enter` = **follow_up**（harness `follow_up()`）—— 原版 `prompt()` 已用 `streaming_behavior` 区分，Rust harness 已有 `steer`/`follow_up` 队列
 - 历史记录（持久化到 `~/.tau/history`）、行内自动补全（工具名 + 斜杠命令）
 - 斜杠命令已落地（`commands.rs`：`/help` `/exit` `/clear` `/compact` `/model` `/provider`），REPL 仅需接上 rustyline 的 command 补全
-- thinking level 切换：原版 `set_thinking_level` / `cycle_thinking_level`；catalog 已含 `thinking_levels`/`thinking_parameter`，需在 REPL 暴露 `/thinking` 并把 `thinking_level` 透传到 `StreamRequest`（当前 `StreamRequest` 无 thinking 字段 → **架构改动点**）
+- thinking level 切换：原版 `set_thinking_level` / `cycle_thinking_level`；catalog 已含 `thinking_levels`/`thinking_parameter`,已通过 REPL `/thinking` 命令暴露并把 `thinking_level` 透传到 `StreamRequest`（**已于 Phase 6 落地**，见 §6.3）
 
 ### 6.2 模块草图
 ```
-tau-cli/src/repl/
-  mod.rs          # rustyline Editor 封装，输出重定向到 renderer
-  commands.rs     # 复用 tau-coding::commands
-  history.rs      # 历史持久化
+tau-cli/src/repl.rs       # rustyline Editor (single file, not a directory)
 ```
 `CodingSession` 已提供 `prompt() -> Stream`（5.1）、`cancel()`（5.2 中断修复）、`set_model`/`set_provider`（5.4），REPL 只做 I/O 编排，不触碰协议。
 
@@ -581,7 +578,7 @@ Rust 等同约束：**ratatui 只依赖 `tau-types` 事件 + `CodingSession` 只
 | 5 | `tau-coding` | `session/repair.rs` | 中断 tool_call 修复（in-memory，5.2） | ✅ 已完成 |
 | 5 | `tau-cli` | `render/mod.rs` | 三渲染器 plain/json/transcript + `EventRenderer` trait（5.5） | ✅ 已完成 |
 | 5 | `tau-cli` | `main.rs` | print/REPL/resume 全模式 + `--format` + 429 退避（5.1-5.8） | ✅ 已完成 |
-| 6 | `tau-cli` | `repl/` | rustyline REPL、持久化历史、命令/工具/路径补全、`/thinking` 切换 | ✅ 已完成 |
+| 6 | `tau-cli` | `repl.rs` | rustyline REPL、持久化历史、命令/工具/路径补全、`/thinking` 切换 | ✅ 已完成 |
 | 7 | `tau-cli` | `tui/` | ratatui 终端 UI（纯 adapter 先行，`feature = "tui"`） | ✅ 已完成（最小可用子集） |
 
 ## 6.4 测试覆盖
@@ -619,7 +616,7 @@ Phase 4 测试已全部落地（storage 6 + manager 7 + catalog 8 = 21 测试，
 
 | Phase | 模块 | 原版对应 | 状态 |
 |-------|------|----------|------|
-| 6 | `tau-cli/src/repl/` | `cli.py::run_print_mode` / `run_openai_print_mode` 交互分支 | ✅ 已完成 |
+| 6 | `tau-cli/src/repl.rs` | `cli.py::run_print_mode` / `run_openai_print_mode` 交互分支 | ✅ 已完成 |
 | 6 | thinking level 切换 | `session.py::set_thinking_level` / `thinking.py` | ✅ 已完成（`StreamRequest.thinking_level` → `reasoning_effort` / Anthropic adaptive） |
 | 7 | `tau-cli/src/tui/` | `tui/app.py` (6070) + `adapter.py`(纯) + `state.py` | ✅ 已完成（`adapter`/`state`/`ui`/`app` 四件套，对齐分层） |
 | 8 | `credentials::oauth` | `oauth*.py`（device/PKCE） | ⏳ 待实现 |
@@ -688,7 +685,7 @@ TUI          = 一种可能的前端
 |---|---|---|
 | `prompt()`（含 input hooks / prompt 展开 / pre-auto-compact / overflow 重试 / 自动命名副作用） | ✅ 核心路径已实现 | 5.1-5.4 覆盖；缺 input hooks（扩展运行时）与 prompt 模板展开 |
 | `load()` / `branch_to_entry` / `resume` | ✅ `load`/`resume` 已实现；`branch_to_entry` ⏳ | 底层 `SessionState` 树遍历（`tree.rs`）已具备，缺 CLI 暴露 |
-| `set_model` / `set_provider` / `set_thinking_level` / model scoping | 🟡 内存切换已实现（5.4），**持久化 + thinking 待做** | issue #16 推迟；thinking 需 `StreamRequest` 加字段（见 Phase 6.3） |
+| `set_model` / `set_provider` / `set_thinking_level` / model scoping | 🟡 内存切换已实现（5.4）；thinking level 穿透 `StreamRequest` 已于 Phase 6 落地；持久化 model/provider 选择待 Phase 8 | issue #16 推迟持久化 |
 | `compact_now` / `_try_auto_compact` / `_try_overflow_compact` / `_generate_compaction_summary` | ✅ 三触发 + LLM 摘要已实现（5.3） | 与原版对齐 |
 | `_ensure_session_initialized` / `_append_session_entry`（parent_id 链、index） | ✅ 已实现（5.1-5.2） | 双向兼容已锁（5.6） |
 | `skills()` / `context_files()` / `prompt_templates()` / `resources()` | ⏳ 未移植 | 系统提示工程素材缺位，`prompt.rs` 当前只用工具片段 |

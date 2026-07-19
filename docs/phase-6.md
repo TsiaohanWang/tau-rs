@@ -111,7 +111,7 @@
 - `tau-agent/tests/test_agent_harness.rs`：`thinking_level_is_set_and_read_back`——`set`/`get`/`clear` 往返。
 - `tau-cli/src/repl.rs` `tests`：`completes_slash_commands` / `completes_tool_names_on_plain_input` / `no_completion_in_middle_of_line`——`ReplHelper::complete` 行为。
 - `tau-coding/src/commands.rs`：`parse_thinking_with_and_without_arg`。
-- 测试总数 184 → **190**（+6：`tau-ai` +1、`tau-agent` +1、`tau-cli` +3、`tau-coding` +1）。
+- 测试总数 184 → **190**（+6：`tau-ai` +1、`tau-agent` +1、`tau-cli` +3、`tau-coding` +1；截至 2026-07-19 全仓已 200+）。
 - `README.md` 测试徽章 184→190、测试清单表、Phase 6 roadmap 标记 Done。
 - `docs/architecture.md` §4 Phase 6（标记 Done）、§6.3 模块表、§6.6 待实现表同步。
 
@@ -128,7 +128,7 @@
 
 ### 4.2 回归
 
-- 全量 `cargo test --workspace --features tau-agent/testing` 绿（190）。
+- 全量 `cargo test --workspace --features tau-agent/testing` 绿（撰写时 190）。
 - `cargo clippy --workspace --all-targets --features tau-agent/testing -- -D warnings` 绿。
 - `cargo fmt --check` 绿。
 
@@ -158,7 +158,7 @@ printf '! echo hi\n/exit\n' | ./target/debug/tau -P opencode
 - [x] `/thinking` 显示/设置/清除均正确（CLI 可观测）。
 - [x] rustyline REPL 启动、历史保存/加载、Tab 补全可用、`Ctrl-C`/`Ctrl-D` 行为正确。
 - [x] thinking 等级穿透到 provider 请求体（OpenAI `reasoning_effort`、Anthropic adaptive）。
-- [x] 190 测试全绿；clippy `-D warnings`；fmt 干净。
+- [x] 全量测试绿（撰写时 190；截至 2026-07-19 全仓 200/205）；clippy；fmt 干净。
 - [x] 手动冒烟：`/help` / `/thinking` / `!` escape / 历史持久化均通过。
 
 ---

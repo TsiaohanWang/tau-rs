@@ -220,7 +220,7 @@ storage.append(&SessionEntry::Leaf(LeafEntry::default())).await?;
 ## 7. 验收
 
 - [x] `cargo build --workspace` 零警告
-- [x] `cargo test --workspace --features tau-agent/testing` 全绿（130 测试）
+- [x] `cargo test --workspace --features tau-agent/testing` 全绿（撰写时 130 测试；截至 2026-07-19 全仓已 200+ 测试）
 - [x] `tau-coding` session 模块单元测试通过（6 storage + 7 manager = 13 测试）
 - [x] `tau-coding` catalog 模块单元测试通过（8 测试）
 - [x] CLI print 模式自动创建 session 文件并持久化消息

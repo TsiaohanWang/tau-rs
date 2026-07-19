@@ -435,10 +435,10 @@ cargo tree --workspace 2>/dev/null | grep -i ratatui
 #### Run All Tests
 
 ```bash
-# Default (193 tests — TUI module excluded without "tui" feature)
+# Default (200 tests — TUI module excluded without "tui" feature)
 cargo test --workspace
 
-# With TUI feature (198 tests — includes 5 TUI adapter tests)
+# With TUI feature (205 tests — includes 5 TUI adapter tests)
 cargo test --workspace --features tui
 
 # ===== Run specific crate tests =====
@@ -713,7 +713,7 @@ The test suite includes **200 tests** (default) / **205** with `--features tui` 
 | `tau-cli` | 11 (render module + subprocess CLI tests + REPL completion + TUI) | 9 (subprocess CLI tests) | 20 |
 | **Total** | **151** | **41** | **192** |
 
-> 测试总数以 `cargo test --workspace` 实时结果为准（默认 **200** / `--features tui` **205**，含 `tau-types` 新增 7 个 hand-written `Deserialize` proptest 性质测试）；上表为分类快照。
+> 测试总数以 `cargo test --workspace` 实时结果为准（默认 **200** / `--features tui` **205**）。上表为分类快照，行合计与实时总数存在差异（如 doc-test / 各 crate 独立计数方式不同），以命令输出为准。
 
 **Integration test patterns**:
 - `tau-ai` tests use [wiremock](https://github.com/LukeMathWalker/wiremock-rs) to mock HTTP responses and verify SSE parsing + retry behavior
