@@ -42,7 +42,8 @@ tau-rs/
 │   ├── architecture.md        # Full architecture design document (Chinese)
 │   ├── phase-1.md             # Phase 1 implementation plan with ADRs
 │   ├── phase-3.md             # Phase 3 implementation plan
-│   ├── phase-4.md             # Phase 4 implementation plan
+│   ├── phase-4.md            # Phase 4 implementation plan
+│   ├── phase-6.md            # Phase 6 implementation plan (rustyline REPL + thinking)
 │   └── gap-analysis.md        # Gap analysis vs Python original
 └── rust-toolchain.toml        # Rust stable + rustfmt + clippy
 ```
