@@ -22,8 +22,8 @@ The project is structured as a Cargo workspace with five crates, each correspond
 | Wire models | pydantic `Field(discriminator=...)` | serde `#[serde(tag)]` (stricter, compile-time) |
 | Data compat | `~/.tau/` JSONL | Reads the same files, byte-identical wire format |
 | Concurrency | GIL + `threading` | True parallelism via tokio |
-| Extension system | Dynamic Python plugins | Static trait boundary (v1); dynamic loading deferred |
-| TUI | Textual (Python) | ratatui (planned) |
+| Extension system | Dynamic Python plugins | Static trait boundary (v1); dynamic loading deferred (see §7.7) |
+| TUI | Textual (Python) | Plain + 3 renderers ready; ratatui planned (Phase 7) |
 
 ---
 
@@ -62,6 +62,8 @@ tau-cli    (binary: clap CLI, REPL, print mode)
 ```
 
 Key design principle: **`tau-agent` owns the `ModelProvider` trait**, not `tau-ai`. This inverts the naive dependency direction and ensures the core brain crate has no HTTP dependencies. `tau-coding` builds on top of `tau-agent` + `tau-ai`, providing the coding-specific layer (tools, on-disk session storage, and catalog merging) consumed by `tau-cli`.
+
+> For a deep architecture-level comparison against the original Python implementation (layering, stream semantics, the `CodingSession` breadth gap, provider convergence, and the two real-API bugs caught during validation), see [`docs/architecture.md` §7](docs/architecture.md).
 
 ---
 
@@ -146,7 +148,7 @@ The coding-specific layer that wires `tau-agent` + `tau-ai` into a usable coding
 
 **Phase 4 scope**: `JsonlSessionStorage` + `SessionManager` (session persistence) and `merge_catalogs` (catalog merge) integrated into the CLI — print and REPL modes now persist `SessionInfo` + `MessageEntry` + `LeafEntry` rows per turn.
 
-**Architecture audit (15 fixes)**: CatalogConfig deduplication, SSE true streaming, CodingSession skeleton, file locking, atomic writes, similar-based edit diffs, context-window estimation, compaction basics, tool event display, async SessionManager, system prompt assembler, and more.
+**Architecture audit (15 fixes)**: CatalogConfig deduplication, SSE true streaming, CodingSession foundation, file locking, atomic writes, similar-based edit diffs, context-window estimation, compaction basics, tool event display, async SessionManager, system prompt assembler, and more. CodingSession is now a complete composition root (Phase 5.1–5.8); see `docs/architecture.md` §7 for the full comparison vs the original Python `CodingSession`.
 
 ---
 
@@ -478,10 +480,10 @@ The OpenCode free models rotate (`deepseek-v4-flash-free`, `mimo-v2.5-free`, `ne
 | Phase 2 | ✅ Done | `tau-ai` (Anthropic + OpenAI providers, SSE, retry, HTTP) |
 | Phase 3 | ✅ Done | Built-in tools (read/write/edit/bash) + `tau-cli` harness integration (print mode, REPL, config) |
 | Phase 4 | ✅ Done | Session persistence (`JsonlSessionStorage` + `SessionManager`) and catalog merge (`merge_catalogs` + embedded built-in catalog) integrated into CLI |
-| Phase 5 | ✅ Done | `CodingSession` 组合根、load/resume、compaction、自动命名/斜杠命令/`!` shell escape、三渲染器、双向兼容 golden 验证、真实 API 端到端验证（5.1–5.7） |
-| Phase 6 | 🔲 Planned | Advanced REPL (rustyline, history, autocomplete) |
-| Phase 7 | 🔲 Planned | ratatui TUI |
-| Phase 8 | 🔲 Planned | OAuth, additional providers, session export |
+| Phase 5 | ✅ Done | `CodingSession` 组合根、load/resume、compaction（三触发+LLM 摘要）、自动命名/斜杠命令/`!` shell escape、三渲染器（plain/json/transcript）、双向兼容 golden 验证、真实 API 端到端验证（5.1–5.7）、429 限流专用退避（5.8） |
+| Phase 6 | 🔲 Planned | 高级 REPL（rustyline 历史/补全、thinking 切换、steer/follow-up 语义） |
+| Phase 7 | 🔲 Planned | ratatui TUI（纯 `TuiEventAdapter` 先行，对齐原版 `tui/adapter.py` 分层） |
+| Phase 8 | 🔲 Planned | OAuth 流、openai-codex/google/mistral 适配器、skills/context 文件、session 导出、扩展再评估 |
 
 ---
 
