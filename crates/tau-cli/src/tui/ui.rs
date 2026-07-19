@@ -194,7 +194,7 @@ fn draw_input(frame: &mut ratatui::Frame<'_>, input: &str, cursor_byte: usize, a
     let mut spans: Vec<Span<'_>> = Vec::new();
     spans.push(Span::styled(prompt, Style::default().fg(Color::DarkGray)));
 
-    // Split input at cursor (byte position) to insert a visible cursor block
+    // Split input at cursor (byte position) to insert a visible cursor block.
     let (before, at_cursor, after) = if cursor_byte >= input.len() {
         (input, "", "")
     } else if let Some((byte_pos, ch)) = input.char_indices().find(|(i, _)| *i == cursor_byte) {
@@ -207,19 +207,17 @@ fn draw_input(frame: &mut ratatui::Frame<'_>, input: &str, cursor_byte: usize, a
         (input, "", "")
     };
 
-    spans.push(Span::raw(before));
-    if cursor_byte < input.len() || !input.is_empty() {
-        spans.push(Span::styled(
-            if at_cursor.is_empty() { " " } else { at_cursor },
-            Style::default().bg(Color::White).fg(Color::Black),
-        ));
-    } else {
-        // Cursor at end of input — show a space block
-        spans.push(Span::styled(
-            " ",
-            Style::default().bg(Color::White).fg(Color::Black),
-        ));
+    // Only push non-empty spans — empty Span::raw("") causes ratatui rendering
+    // artifacts (cursor residue, input not clearing between frames).
+    if !before.is_empty() {
+        spans.push(Span::raw(before));
     }
+    // Cursor block: highlight character, or show space at end / empty input
+    let cursor_text = if at_cursor.is_empty() { " " } else { at_cursor };
+    spans.push(Span::styled(
+        cursor_text,
+        Style::default().bg(Color::White).fg(Color::Black),
+    ));
     if !after.is_empty() {
         spans.push(Span::raw(after));
     }

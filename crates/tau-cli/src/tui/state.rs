@@ -380,13 +380,11 @@ impl TuiState {
     /// Replace provisional delta rows with the final canonical message.
     pub fn finalize_assistant(&mut self, message: &AssistantMessage) {
         if let Some(start) = self.assistant_start_index.take() {
-            // Drop the provisional buffered rows (which occupy [start..]).
             self.items.truncate(start);
         }
-        // Do NOT flush the assistant_buffer here — the canonical message in
-        // add_assistant_message already contains the final text.  If we
-        // flushed, we'd add the same text twice (once from the delta buffer,
-        // once from the canonical content).
+        // Discard the delta buffer — canonical content replaces it.
+        // If we left it, AgentEnd's flush() would append a duplicate.
+        self.assistant_buffer.clear();
         if message.stop_reason == tau_types::StopReason::Error
             || message.stop_reason == tau_types::StopReason::Aborted
         {
