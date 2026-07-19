@@ -5,17 +5,29 @@ use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
-use tau_agent::tool::{AgentTool, ToolError, ToolExecutionMode, ToolExecutor};
+use tau_agent::tool::{
+    AgentTool, NoPathPolicy, PathPolicy, ToolError, ToolExecutionMode, ToolExecutor,
+};
 use tau_types::AgentToolResult;
 
 pub struct WriteExecutor {
     cwd: PathBuf,
+    path_policy: Arc<dyn PathPolicy>,
 }
 
 impl WriteExecutor {
     pub fn new(cwd: &Path) -> Self {
         WriteExecutor {
             cwd: cwd.to_path_buf(),
+            path_policy: Arc::new(NoPathPolicy),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn new_with_policy(cwd: &Path, path_policy: Arc<dyn PathPolicy>) -> Self {
+        WriteExecutor {
+            cwd: cwd.to_path_buf(),
+            path_policy,
         }
     }
 }
@@ -39,15 +51,10 @@ impl ToolExecutor for WriteExecutor {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::new("Missing required argument: content"))?;
 
-        let file_path = if let Some(stripped) = path.strip_prefix('~') {
-            let home = dirs::home_dir()
-                .ok_or_else(|| ToolError::new("Cannot determine home directory"))?;
-            home.join(stripped)
-        } else if Path::new(path).is_absolute() {
-            PathBuf::from(path)
-        } else {
-            self.cwd.join(path)
-        };
+        let file_path = self
+            .path_policy
+            .check(&self.cwd, Path::new(path))
+            .map_err(|e| ToolError::new(e))?;
 
         if let Some(parent) = file_path.parent() {
             tokio::fs::create_dir_all(parent)

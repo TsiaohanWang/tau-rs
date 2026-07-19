@@ -5,17 +5,29 @@ use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
-use tau_agent::tool::{AgentTool, ToolError, ToolExecutionMode, ToolExecutor};
+use tau_agent::tool::{
+    AgentTool, NoPathPolicy, PathPolicy, ToolError, ToolExecutionMode, ToolExecutor,
+};
 use tau_types::AgentToolResult;
 
 pub struct ReadExecutor {
     cwd: PathBuf,
+    path_policy: Arc<dyn PathPolicy>,
 }
 
 impl ReadExecutor {
     pub fn new(cwd: &Path) -> Self {
         ReadExecutor {
             cwd: cwd.to_path_buf(),
+            path_policy: Arc::new(NoPathPolicy),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn new_with_policy(cwd: &Path, path_policy: Arc<dyn PathPolicy>) -> Self {
+        ReadExecutor {
+            cwd: cwd.to_path_buf(),
+            path_policy,
         }
     }
 }
@@ -44,16 +56,11 @@ impl ToolExecutor for ReadExecutor {
             .and_then(|v| v.as_u64())
             .unwrap_or(2000) as usize;
 
-        // Resolve path relative to cwd
-        let file_path = if let Some(stripped) = path.strip_prefix('~') {
-            let home = dirs::home_dir()
-                .ok_or_else(|| ToolError::new("Cannot determine home directory"))?;
-            home.join(stripped)
-        } else if Path::new(path).is_absolute() {
-            PathBuf::from(path)
-        } else {
-            self.cwd.join(path)
-        };
+        // Resolve and validate via path policy
+        let file_path = self
+            .path_policy
+            .check(&self.cwd, Path::new(path))
+            .map_err(|e| ToolError::new(e))?;
 
         // Read file content
         let content = tokio::fs::read_to_string(&file_path)

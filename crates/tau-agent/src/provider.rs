@@ -24,6 +24,10 @@ pub struct StreamRequest<'a> {
     /// Providers translate this into their vendor-specific parameter via the
     /// catalog `thinking_parameter` mapping. `None` leaves the provider
     /// default. Mirrors the original `tau_coding.thinking.ThinkingLevel`.
+    ///
+    /// NOTE: As Phase 8 adds more provider-specific options, consider
+    /// a generic `extras: &Map<String, Value>` bag rather than adding a
+    /// field per feature.  See `docs/review-2026-07-19-2.md` §1.
     pub thinking_level: Option<&'a str>,
 }
 

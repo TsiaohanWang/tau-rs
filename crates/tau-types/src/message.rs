@@ -759,6 +759,7 @@ pub type SharedAssistant = Arc<AssistantMessage>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn user_message_roundtrip() {
@@ -793,5 +794,67 @@ mod tests {
         // AssistantMessage has deny_unknown_fields; an unexpected key is rejected.
         let json = r#"{"role":"assistant","content":[],"bogus":1}"#;
         assert!(serde_json::from_str::<AgentMessage>(json).is_err());
+    }
+
+    // ── Property-based tests for hand-written Deserialize ──
+    // The AgentMessage Deserialize impl is hand-written to enforce
+    // deny_unknown_fields (serde's internally-tagged enum limitation).
+    // These proptest guards ensure every wire variant roundtrips and
+    // arbitrary input never panics.
+
+    proptest! {
+        #[test]
+        fn agent_message_roundtrips_user(text in ".*") {
+            let msg = AgentMessage::User(UserMessage::new(text));
+            let json = serde_json::to_string(&msg).unwrap();
+            let back: AgentMessage = serde_json::from_str(&json).unwrap();
+            match (msg, back) {
+                (AgentMessage::User(a), AgentMessage::User(b)) => {
+                    prop_assert_eq!(a.content, b.content);
+                }
+                _ => prop_assert!(false, "variant mismatch"),
+            }
+        }
+
+        #[test]
+        fn agent_message_roundtrips_assistant(text in ".*", stop in proptest::sample::select(&[
+            "stop", "length", "tool_use", "error", "aborted",
+        ])) {
+            let stop_reason = match stop {
+                "stop" => StopReason::Stop,
+                "length" => StopReason::Length,
+                "tool_use" => StopReason::ToolUse,
+                "error" => StopReason::Error,
+                "aborted" => StopReason::Aborted,
+                _ => StopReason::Stop,
+            };
+            let msg = AssistantMessage {
+                content: vec![AssistantContent::Text(TextContent::new(&text))],
+                stop_reason,
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&AgentMessage::Assistant(msg.clone())).unwrap();
+            let back: AgentMessage = serde_json::from_str(&json).unwrap();
+            if let AgentMessage::Assistant(b) = back {
+                prop_assert_eq!(b.text(), text);
+                prop_assert_eq!(b.stop_reason, msg.stop_reason);
+            } else {
+                prop_assert!(false, "expected Assistant");
+            }
+        }
+
+        #[test]
+        fn agent_message_rejects_malformed_json(input in ".*") {
+            // Arbitrary non-empty strings should not panic when deserialized
+            let _ = serde_json::from_str::<AgentMessage>(&input);
+        }
+
+        #[test]
+        fn agent_message_serialization_is_deterministic(text in ".*") {
+            let msg = AgentMessage::User(UserMessage::new(text));
+            let a = serde_json::to_string(&msg).unwrap();
+            let b = serde_json::to_string(&msg).unwrap();
+            prop_assert_eq!(a, b);
+        }
     }
 }

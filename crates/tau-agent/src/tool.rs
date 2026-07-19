@@ -6,6 +6,7 @@
 //! shared (Arc) handles so it is cheaply `Clone` and safely shared across the
 //! loop, harness and any extension runtime.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -88,6 +89,70 @@ pub trait AfterToolCall: Send + Sync {
         result: AgentToolResult,
         is_error: bool,
     ) -> BoxFuture<'_, (AgentToolResult, bool)>;
+}
+
+/// Pluggable filesystem-path policy for file tools (read / write / edit).
+///
+/// By default a `NoPathPolicy` allows all paths.  Swap in a
+/// `RestrictedPathPolicy` (or your own impl) to enforce a project‑root
+/// sandbox so the agent cannot escape the working directory.
+pub trait PathPolicy: Send + Sync {
+    /// Validate that a file operation targeting `path` is permitted.
+    /// `cwd` is the tool's configured working directory (usually the
+    /// project root).  Return `Ok(resolved_path)` if allowed, or an
+    /// error describing the violation.
+    fn check(&self, cwd: &Path, path: &Path) -> Result<PathBuf, String>;
+}
+
+/// Default policy: allow everything (no sandbox).
+#[derive(Clone, Default)]
+pub struct NoPathPolicy;
+
+impl PathPolicy for NoPathPolicy {
+    fn check(&self, cwd: &Path, path: &Path) -> Result<PathBuf, String> {
+        Ok(if path.is_relative() {
+            cwd.join(path)
+        } else {
+            path.to_path_buf()
+        })
+    }
+}
+
+/// Restrict file operations to paths inside a given root.
+#[derive(Clone)]
+pub struct RestrictedPathPolicy {
+    root: PathBuf,
+}
+
+impl RestrictedPathPolicy {
+    pub fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+}
+
+impl PathPolicy for RestrictedPathPolicy {
+    fn check(&self, cwd: &Path, path: &Path) -> Result<PathBuf, String> {
+        let resolved = if path.is_relative() {
+            cwd.join(path)
+        } else {
+            path.to_path_buf()
+        };
+        let canonical = resolved
+            .canonicalize()
+            .map_err(|e| format!("cannot resolve path {:?}: {}", resolved, e))?;
+        let root_canonical = self
+            .root
+            .canonicalize()
+            .map_err(|e| format!("cannot resolve root {:?}: {}", self.root, e))?;
+        if canonical.starts_with(&root_canonical) {
+            Ok(canonical)
+        } else {
+            Err(format!(
+                "path {:?} is outside the allowed root {:?}",
+                canonical, root_canonical
+            ))
+        }
+    }
 }
 
 /// A tool exposed to the portable agent loop.

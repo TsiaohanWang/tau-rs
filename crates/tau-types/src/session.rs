@@ -328,3 +328,61 @@ fn entry_type_custom() -> EntryType {
 /// Marker re-export so callers can build `Arc<SessionEntry>` snapshots without
 /// importing `std::sync` ad hoc.
 pub type SharedEntry = Arc<SessionEntry>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn message_entry_roundtrip() {
+        let msg = AgentMessage::User(crate::UserMessage::new("test message"));
+        let entry = MessageEntry {
+            id: "id1".into(),
+            parent_id: Some("p1".into()),
+            timestamp: 1000.0,
+            r#type: EntryType::Message,
+            message: msg,
+        };
+        let session = SessionEntry::Message(Box::new(entry));
+        let json = serde_json::to_string(&session).unwrap();
+        let back: SessionEntry = serde_json::from_str(&json).unwrap();
+        match back {
+            SessionEntry::Message(e) => {
+                assert_eq!(e.parent_id.as_deref(), Some("p1"));
+                let mj = serde_json::to_string(&e.message).unwrap();
+                assert!(mj.contains("test message"));
+            }
+            other => panic!("expected Message, got {:?}", other),
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn session_entry_never_panics(input in r#""\{.*\}""#) {
+            let _ = serde_json::from_str::<SessionEntry>(&input);
+        }
+
+        #[test]
+        fn message_entry_roundtrips_user_via_proptest(text in ".*") {
+            let msg = AgentMessage::User(crate::UserMessage::new(text));
+            let entry = MessageEntry {
+                id: "proptest-id".into(),
+                parent_id: Some("proptest-parent".into()),
+                timestamp: 0.0,
+                r#type: EntryType::Message,
+                message: msg,
+            };
+            let session = SessionEntry::Message(Box::new(entry));
+            let json = serde_json::to_string(&session).unwrap();
+            let back: SessionEntry = serde_json::from_str(&json).unwrap();
+            match back {
+                SessionEntry::Message(e) => {
+                    prop_assert_eq!(e.parent_id.as_deref(), Some("proptest-parent"));
+                    prop_assert_eq!(e.id, "proptest-id");
+                }
+                other => prop_assert!(false, "expected Message, got {:?}", other),
+            }
+        }
+    }
+}
