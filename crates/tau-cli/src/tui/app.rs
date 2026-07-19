@@ -246,27 +246,21 @@ async fn handle_idle_key(
         _ => {}
     }
 
-    // Input editing
+    // Input editing (Unicode-safe byte cursor)
     match key.code {
         KeyCode::Char(ch) => {
             app.input.insert(app.cursor, ch);
-            app.cursor += 1;
+            app.cursor += ch.len_utf8();
         }
         KeyCode::Backspace => {
-            if app.cursor > 0 {
-                app.cursor -= 1;
-                app.input.remove(app.cursor);
-            }
+            let c = app.cursor;
+            app.cursor = cursor_byte_backspace(&mut app.input, c);
         }
         KeyCode::Left => {
-            if app.cursor > 0 {
-                app.cursor -= 1;
-            }
+            app.cursor = cursor_byte_left(&app.input, app.cursor);
         }
         KeyCode::Right => {
-            if app.cursor < app.input.len() {
-                app.cursor += 1;
-            }
+            app.cursor = cursor_byte_right(&app.input, app.cursor);
         }
         KeyCode::Home => {
             app.cursor = 0;
@@ -448,27 +442,21 @@ fn handle_streaming_key(app: &mut App, key: crossterm::event::KeyEvent, harness:
         _ => {}
     }
 
-    // Input editing (for steer text)
+    // Input editing (for steer text, Unicode-safe)
     match key.code {
         KeyCode::Char(ch) => {
             app.input.insert(app.cursor, ch);
-            app.cursor += 1;
+            app.cursor += ch.len_utf8();
         }
         KeyCode::Backspace => {
-            if app.cursor > 0 {
-                app.cursor -= 1;
-                app.input.remove(app.cursor);
-            }
+            let c = app.cursor;
+            app.cursor = cursor_byte_backspace(&mut app.input, c);
         }
         KeyCode::Left => {
-            if app.cursor > 0 {
-                app.cursor -= 1;
-            }
+            app.cursor = cursor_byte_left(&app.input, app.cursor);
         }
         KeyCode::Right => {
-            if app.cursor < app.input.len() {
-                app.cursor += 1;
-            }
+            app.cursor = cursor_byte_right(&app.input, app.cursor);
         }
         KeyCode::Home => {
             app.cursor = 0;
@@ -480,14 +468,58 @@ fn handle_streaming_key(app: &mut App, key: crossterm::event::KeyEvent, harness:
     }
 }
 
+/// Byte-safe cursor operations — all positions are byte offsets guaranteed
+/// to land on character boundaries.
+/// Move cursor left one character. Returns the new byte position.
+fn cursor_byte_left(s: &str, cursor: usize) -> usize {
+    if cursor == 0 {
+        return 0;
+    }
+    // Find the start of the character before `cursor`
+    let prev = s[..cursor].char_indices().next_back();
+    match prev {
+        Some((i, _)) => i,
+        None => 0,
+    }
+}
+
+/// Move cursor right one character. Returns the new byte position.
+fn cursor_byte_right(s: &str, cursor: usize) -> usize {
+    if cursor >= s.len() {
+        return s.len();
+    }
+    // Find the start of the character at or after `cursor`
+    s[cursor..]
+        .chars()
+        .next()
+        .map(|ch| cursor + ch.len_utf8())
+        .unwrap_or(s.len())
+}
+
+/// Backspace: remove the character before the cursor and return the new
+/// byte position.
+fn cursor_byte_backspace(s: &mut String, cursor: usize) -> usize {
+    if cursor == 0 || s.is_empty() {
+        return 0;
+    }
+    let prev = s[..cursor].char_indices().next_back();
+    if let Some((byte_pos, ch)) = prev {
+        let len = ch.len_utf8();
+        s.drain(byte_pos..byte_pos + len);
+        byte_pos
+    } else {
+        cursor
+    }
+}
+
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    // Show cursor so the user sees their input position
-    terminal.show_cursor()?;
+    // Hide terminal cursor — we render our own cursor block in draw_input
+    terminal.hide_cursor()?;
     terminal.clear()?;
     Ok(terminal)
 }

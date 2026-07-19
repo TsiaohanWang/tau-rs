@@ -189,19 +189,44 @@ fn render_item(
     out.push(Line::from(""));
 }
 
-fn draw_input(frame: &mut ratatui::Frame<'_>, input: &str, cursor: usize, area: Rect) {
+fn draw_input(frame: &mut ratatui::Frame<'_>, input: &str, cursor_byte: usize, area: Rect) {
     let prompt = "> ";
-    let text = format!("{}{}", prompt, input);
-    let para = Paragraph::new(text)
-        .style(Style::default().fg(Color::White))
-        .block(Block::default().borders(Borders::ALL).title(" Input "));
-    frame.render_widget(para, area);
+    let mut spans: Vec<Span<'_>> = Vec::new();
+    spans.push(Span::styled(prompt, Style::default().fg(Color::DarkGray)));
 
-    // prompt.len() is correct for ASCII "> " (2 bytes = 2 display cols)
-    let cx = area.x + 1 + prompt.len() as u16 + cursor as u16;
-    if cx < area.x + area.width.saturating_sub(1) {
-        frame.set_cursor_position((cx, area.y + 1));
+    // Split input at cursor (byte position) to insert a visible cursor block
+    let (before, at_cursor, after) = if cursor_byte >= input.len() {
+        (input, "", "")
+    } else if let Some((byte_pos, ch)) = input.char_indices().find(|(i, _)| *i == cursor_byte) {
+        (
+            &input[..byte_pos],
+            &input[byte_pos..byte_pos + ch.len_utf8()],
+            &input[byte_pos + ch.len_utf8()..],
+        )
+    } else {
+        (input, "", "")
+    };
+
+    spans.push(Span::raw(before));
+    if cursor_byte < input.len() || !input.is_empty() {
+        spans.push(Span::styled(
+            if at_cursor.is_empty() { " " } else { at_cursor },
+            Style::default().bg(Color::White).fg(Color::Black),
+        ));
+    } else {
+        // Cursor at end of input — show a space block
+        spans.push(Span::styled(
+            " ",
+            Style::default().bg(Color::White).fg(Color::Black),
+        ));
     }
+    if !after.is_empty() {
+        spans.push(Span::raw(after));
+    }
+
+    let line = Line::from(spans);
+    let para = Paragraph::new(line).block(Block::default().borders(Borders::ALL).title(" Input "));
+    frame.render_widget(para, area);
 }
 
 fn draw_status(
