@@ -4,7 +4,7 @@
 
 本文件是 huggingface/tau（Python）到 Rust 重写的总体架构设计与全套迁移计划。它基于对原项目三个包（`tau_ai` ≈4.1k 行、`tau_agent` ≈1.7k 行、`tau_coding` ≈25.7k 行）全部核心源码的通读产出。
 
-> **当前状态**: Phase 1-5 全部完成（含 5.1-5.8），共 **184 测试**全绿，clippy `-D warnings` 与 `fmt` 通过。已用真实 OpenCode 免费模型端到端验证（LRU crate 10/10、resume 18/18、429 退避、wire 双向兼容 golden）。剩余为 Phase 6（REPL）、Phase 7（ratatui TUI）、Phase 8（OAuth / 更多 provider / skills / 扩展）。详见文末 §6 与 §4。
+> **当前状态**: Phase 1-7 全部完成（含 5.1-5.8、6 REPL、7 ratatui TUI），共 **195 测试**全绿，clippy 与 `fmt` 通过（TUI 置于 `feature = "tui"`，默认不编译）。已用真实 OpenCode 免费模型端到端验证（LRU crate 10/10、resume 18/18、429 退避、wire 双向兼容 golden）。剩余为 Phase 8（OAuth / 更多 provider / skills / 扩展）。详见文末 §6 与 §4。
 
 范围决策（已确认）：
 
@@ -464,8 +464,14 @@ tau-cli/src/repl/
 - `StreamRequest`（`tau-agent`）增加 `thinking_level: Option<&str>`，由 provider 适配层翻译为 catalog 的 `thinking_parameter`（如 `reasoning_effort`）——原版 `ThinkingLevel` 枚举 + `_sync_thinking_level_to_active_model` 逻辑需复刻到 `tau-coding::thinking`（原版 `thinking.py` 约 200 行）。
 - 当前 `CodingSession::set_model`/`set_provider` 仅改内存（issue #16 推迟）；REPL 的 `/model` `/provider` 切换应按原版 `_persist_default_model_choice` 落盘 `providers.json` 偏好 + 追加 `ModelChangeEntry`/`ThinkingLevelChangeEntry`。
 
-## Phase 7 — ratatui TUI（可裁剪，待实现）
-原版 TUI 是 **6070 行** `tui/app.py` + `adapter.py`（纯 `apply(event)`）+ `state.py` + `widgets.py` + `autocomplete.py`。这是重写成本最高、收益最外围的一块，建议严格按"纯 adapter 先行"策略。
+## Phase 7 — ratatui TUI（已落地，feature = "tui"）
+原版 TUI 是 **6070 行** `tui/app.py` + `adapter.py`（纯 `apply(event)`）+ `state.py` + `widgets.py` + `autocomplete.py`。Rust 端按"纯 adapter 先行"策略落地最小可用子集：
+
+- `tau-cli/src/tui/adapter.rs`：`TuiEventAdapter::apply(&AgentEvent)`，逐事件翻译，无 ratatui 依赖、可单测（5 个单测覆盖 start/end、text/thinking delta、tool、user）。
+- `tau-cli/src/tui/state.rs`：`TuiState` + `ChatItem`，对齐 `state.py` 数据模型（tool 折叠/展开、thinking 折叠/展开、branch/compaction summary、resume 回灌 `load_messages`）。
+- `tau-cli/src/tui/ui.rs`：ratatui `draw`，transcript（滚动）+ input 行 + status 条三段式布局；role 配色、tool 结果 `Ctrl-O` 切换、thinking `Ctrl-T` 切换。
+- `tau-cli/src/tui/app.rs`：crossterm raw-mode + 备屏，`tokio::select!` 桥接按键通道与 `CodingSession::prompt()` 流；steering/cancel 经克隆 `AgentHarness` 句柄（不占 `&mut session`，与活流借用不冲突）。
+- 运行：`cargo run --features tui -- --tui`（无 `tui` feature 的普通构建不拉 ratatui）。
 
 ### 7.1 移植顺序（对齐原版分层：`TuiEventAdapter.apply` 是纯函数，最易移植）
 1. **`TuiState` + `apply(&mut TuiState, &CodingSessionEvent)`**：先把原版 `adapter.py` 的 `apply` 逐事件翻译为 Rust 纯函数（无 ratatui 依赖，可单测）。事件源 = `CodingSession::prompt()` 产出的 `AgentEvent`，经 `EventRenderer` 同款管线。
@@ -576,7 +582,7 @@ Rust 等同约束：**ratatui 只依赖 `tau-types` 事件 + `CodingSession` 只
 | 5 | `tau-cli` | `render/mod.rs` | 三渲染器 plain/json/transcript + `EventRenderer` trait（5.5） | ✅ 已完成 |
 | 5 | `tau-cli` | `main.rs` | print/REPL/resume 全模式 + `--format` + 429 退避（5.1-5.8） | ✅ 已完成 |
 | 6 | `tau-cli` | `repl/` | rustyline REPL、持久化历史、命令/工具/路径补全、`/thinking` 切换 | ✅ 已完成 |
-| 7 | `tau-cli` | `tui/` | ratatui 全量终端 UI（纯 adapter 先行） | ⏳ 待实现（见 §4 Phase 7） |
+| 7 | `tau-cli` | `tui/` | ratatui 终端 UI（纯 adapter 先行，`feature = "tui"`） | ✅ 已完成（最小可用子集） |
 
 ## 6.4 测试覆盖
 
@@ -611,7 +617,7 @@ Phase 4 测试已全部落地（storage 4 + manager 6 + catalog 3 = 13 测试，
 |-------|------|----------|------|
 | 6 | `tau-cli/src/repl/` | `cli.py::run_print_mode` / `run_openai_print_mode` 交互分支 | ✅ 已完成 |
 | 6 | thinking level 切换 | `session.py::set_thinking_level` / `thinking.py` | ✅ 已完成（`StreamRequest.thinking_level` → `reasoning_effort` / Anthropic adaptive） |
-| 7 | `tau-cli/src/tui/` | `tui/app.py` (6070) + `adapter.py`(纯) + `state.py` | ⏳ 待实现（纯 adapter 先行） |
+| 7 | `tau-cli/src/tui/` | `tui/app.py` (6070) + `adapter.py`(纯) + `state.py` | ✅ 已完成（`adapter`/`state`/`ui`/`app` 四件套，对齐分层） |
 | 8 | `credentials::oauth` | `oauth*.py`（device/PKCE） | ⏳ 待实现 |
 | 8 | `OpenAICodexProvider` | `tau_ai/openai_codex.py` | ⏳ 待实现 |
 | 8 | google / mistral 适配器 | `google.py` / `mistral.py` | ⏳ 待实现（catalog `kind` 已分流） |
@@ -724,6 +730,6 @@ TUI          = 一种可能的前端
 | 真实可用性 | ⭐ 已端到端跑通真实编码任务（5.7/5.8） |
 | 组合根广度 | 🟡 核心路径完成，~80 方法中的"环境便利功能"待 Phase 8 |
 | Provider 广度 | 🟡 2 适配器 + catalog 驱动，多 provider/OAuth 待 Phase 8 |
-| TUI | ⏳ 纯文本 + 三渲染器就绪，ratatui 待 Phase 7 |
+| TUI | ✅ 纯文本 + 三渲染器就绪；ratatui TUI 已实现（`--features tui`） |
 
 **一句话**：Rust 重写在"架构骨架 + 核心正确性 + 真实可跑"层面已全面达到并局部超越原版；剩余工作是原版 `CodingSession` 那 2662 行里大量的**应用层便利功能**与 **TUI/多 provider 广度**，属于可增量、非阻塞的 Phase 6-8。

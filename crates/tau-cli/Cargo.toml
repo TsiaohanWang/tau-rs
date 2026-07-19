@@ -25,6 +25,8 @@ tokio-util.workspace = true
 futures.workspace = true
 dirs = "6"
 rustyline = "14"
+ratatui = { version = "0.29", optional = true }
+crossterm = { version = "0.28", optional = true }
 dotenvy = "0.15"
 toml = "0.8"
 tracing = "0.1"
@@ -35,3 +37,7 @@ anyhow = "1"
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
+
+[features]
+default = []
+tui = ["dep:ratatui", "dep:crossterm"]

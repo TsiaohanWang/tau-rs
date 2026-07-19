@@ -23,7 +23,7 @@ The project is structured as a Cargo workspace with five crates, each correspond
 | Data compat | `~/.tau/` JSONL | Reads the same files, byte-identical wire format |
 | Concurrency | GIL + `threading` | True parallelism via tokio |
 | Extension system | Dynamic Python plugins | Static trait boundary (v1); dynamic loading deferred (see §7.7) |
-| TUI | Textual (Python) | Plain + 3 renderers ready; ratatui planned (Phase 7) |
+| TUI | Textual (Python) | Plain + 3 renderers ready; ratatui TUI available behind `--features tui` (Phase 7) |
 
 ---
 
@@ -483,7 +483,7 @@ The OpenCode free models rotate (`deepseek-v4-flash-free`, `mimo-v2.5-free`, `ne
 | Phase 4 | ✅ Done | Session persistence (`JsonlSessionStorage` + `SessionManager`) and catalog merge (`merge_catalogs` + embedded built-in catalog) integrated into CLI |
 | Phase 5 | ✅ Done | `CodingSession` 组合根、load/resume、compaction（三触发+LLM 摘要）、自动命名/斜杠命令/`!` shell escape、三渲染器（plain/json/transcript）、双向兼容 golden 验证、真实 API 端到端验证（5.1–5.7）、429 限流专用退避（5.8） |
 | Phase 6 | ✅ Done | rustyline REPL（持久化历史、斜杠命令/工具名/路径补全、/thinking 切换、Ctrl-C 清上下文）；thinking_level 穿过 StreamRequest 由 provider 翻译为 reasoning_effort / Anthropic adaptive effort |
-| Phase 7 | 🔲 Planned | ratatui TUI（纯 `TuiEventAdapter` 先行，对齐原版 `tui/adapter.py` 分层） |
+| Phase 7 | ✅ Done | ratatui TUI（`feature = "tui"`，默认不编译）：纯 `TuiEventAdapter.apply(&AgentEvent)` 对齐原版 `tui/adapter.py` 分层；`TuiState` 数据模型对齐 `tui/state.py`；crossterm 终端 + `tokio::select!` 事件循环；仅依赖 `tau-types` 事件 + `CodingSession` 只读接口，绝不反向依赖 harness HTTP。运行 `cargo run --features tui -- --tui` |
 | Phase 8 | 🔲 Planned | OAuth 流、openai-codex/google/mistral 适配器、skills/context 文件、session 导出、扩展再评估 |
 
 ---

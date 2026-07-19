@@ -149,6 +149,7 @@ impl Drop for MessagesGuard {
     }
 }
 
+#[derive(Clone)]
 pub struct AgentHarness {
     config_shared: HarnessConfigShared,
     state: Arc<HarnessState>,

@@ -1,6 +1,8 @@
 mod config;
 mod render;
 mod repl;
+#[cfg(feature = "tui")]
+mod tui;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -59,6 +61,10 @@ struct Cli {
     /// Output format: plain | json | transcript
     #[arg(long, default_value = "plain")]
     format: String,
+
+    /// Use the interactive ratatui TUI (requires the `tui` feature at build time)
+    #[arg(long)]
+    tui: bool,
 }
 
 #[derive(Subcommand)]
@@ -239,6 +245,47 @@ async fn main() -> anyhow::Result<()> {
                     bail!("interactive mode does not accept a prompt; use --print with a prompt");
                 }
                 let history_path = home.root.join("history");
+                if cli.tui {
+                    #[cfg(feature = "tui")]
+                    {
+                        let session = match resume_id {
+                            Some(ref id) => resume_session(
+                                model_provider,
+                                system,
+                                model,
+                                cwd.to_path_buf(),
+                                &home,
+                                id,
+                            )
+                            .await
+                            .context("resuming session for TUI")?,
+                            None => open_or_create_session(
+                                model_provider,
+                                system,
+                                model,
+                                cwd.to_path_buf(),
+                                &home,
+                            )
+                            .await
+                            .context("opening session for TUI")?,
+                        };
+                        crate::tui::app::run(
+                            session,
+                            &cwd,
+                            &history_path,
+                            cli.verbose,
+                            &cli.format,
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                    #[cfg(not(feature = "tui"))]
+                    {
+                        bail!(
+                            "this build was compiled without the `tui` feature; rebuild with --features tui"
+                        );
+                    }
+                }
                 let session = match resume_id {
                     Some(ref id) => {
                         resume_session(model_provider, system, model, cwd.to_path_buf(), &home, id)
