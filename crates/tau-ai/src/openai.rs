@@ -210,6 +210,7 @@ impl OpenAIProvider {
                         let mut tool_builders: HashMap<u32, ToolCallBuilder> = HashMap::new();
                         let mut finish_reason: Option<String> = None;
                         let mut started = false;
+                        let mut resolved_model: String = config.model.clone();
                         let mut lines_processed: u32 = 0;
                         let mut content_chunks: u32 = 0;
                         let mut sse_error: Option<String> = None;
@@ -250,6 +251,7 @@ impl OpenAIProvider {
                             if !started {
                                 started = true;
                                 let model = chunk["model"].as_str().unwrap_or(&config.model);
+                                resolved_model = model.to_string();
                                 yield ProviderEvent::ResponseStart {
                                     model: model.to_string(),
                                 };
@@ -338,6 +340,7 @@ impl OpenAIProvider {
                                 if !started {
                                     started = true;
                                     let model = chunk["model"].as_str().unwrap_or(&config.model);
+                                    resolved_model = model.to_string();
                                     yield ProviderEvent::ResponseStart {
                                         model: model.to_string(),
                                     };
@@ -434,7 +437,10 @@ impl OpenAIProvider {
                             };
                         }
 
-                        let message = AssistantMessage::default();
+                        let message = AssistantMessage {
+                            model: resolved_model.clone(),
+                            ..Default::default()
+                        };
                         yield ProviderEvent::ResponseEnd {
                             message,
                             finish_reason,

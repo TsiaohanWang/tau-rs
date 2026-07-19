@@ -457,6 +457,18 @@ tau-rs is designed to be **fully compatible** with existing `~/.tau/` data from 
 
 ---
 
+## Real-World Validation
+
+tau-rs has been exercised end-to-end against the **OpenCode free tier** (`-P opencode`, real `OPENCODE_ZEN_API_KEY`) with multi-turn coding tasks that drive the real file-system tools and `cargo`:
+
+- **Thread-safe LRU cache** (`nemotron-3-ultra-free`): scaffolded a Rust crate, ran `cargo test`, hit a compile error, **auto-fixed it via the `edit` tool**, re-ran, and finished **10/10 tests passing** (~72s).
+- **Resume across an incomplete edit** (`north-mini-code-free` left a type-annotation error): `--resume latest` loaded the half-finished session and completed it to **18/18 tests passing** (~39s) — validates session persistence + continuation.
+- **`--format json`** emits the full agent event stream; the final `message_end` / `turn_end` now correctly carry the resolved `model` (previously `"unknown"` — fixed in 5.7, see `docs/architecture-issues.md` #17).
+
+The OpenCode free models rotate (`deepseek-v4-flash-free`, `mimo-v2.5-free`, `nemotron-3-ultra-free`, `north-mini-code-free`); some are rate-limited on cold start, so retries/higher `max_retries` are recommended for long tasks.
+
+---
+
 ## Roadmap
 
 | Phase | Status | Description |
@@ -466,7 +478,7 @@ tau-rs is designed to be **fully compatible** with existing `~/.tau/` data from 
 | Phase 2 | ✅ Done | `tau-ai` (Anthropic + OpenAI providers, SSE, retry, HTTP) |
 | Phase 3 | ✅ Done | Built-in tools (read/write/edit/bash) + `tau-cli` harness integration (print mode, REPL, config) |
 | Phase 4 | ✅ Done | Session persistence (`JsonlSessionStorage` + `SessionManager`) and catalog merge (`merge_catalogs` + embedded built-in catalog) integrated into CLI |
-| Phase 5 | 🔲 Planned | `CodingSession` composition root skeleton ✅, compaction basics ✅, commands (remaining) |
+| Phase 5 | ✅ Done | `CodingSession` 组合根、load/resume、compaction、自动命名/斜杠命令/`!` shell escape、三渲染器、双向兼容 golden 验证、真实 API 端到端验证（5.1–5.7） |
 | Phase 6 | 🔲 Planned | Advanced REPL (rustyline, history, autocomplete) |
 | Phase 7 | 🔲 Planned | ratatui TUI |
 | Phase 8 | 🔲 Planned | OAuth, additional providers, session export |

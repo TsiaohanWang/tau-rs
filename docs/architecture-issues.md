@@ -25,6 +25,8 @@
 | 14 | 🟢 P3 | 死字段 `ToolExecutionMode` — 定义但从未读取 | ✅ Fixed |
 | 15 | 🟢 P3 | 文档测试计数不一致（architecture.md 85 vs phase-4.md 104） | ✅ Fixed |
 | 16 | 🟡 P2 | 5.4 遗留：`/model`/`/provider` 仅内存切 + 标题未回填 `SessionInfo.title` | 🚧 Partial (推迟) |
+| 17 | 🟡 P2 | `AssistantMessage` 最终 `MessageEnd`/`turn_end` 的 `model` 字段为 `"unknown"`（流式 `message_update` 有真实 model，但 `ResponseEnd` 聚合消息未回填解析到的 model） | ✅ Fixed (5.7 真实 API 验证) |
+| 18 | 🟡 P2 | catalog `opencode`/`opencode-go` 的 `api_key_env` 为 `OPENCODE_API_KEY`，与实际 `.env` 的 `OPENCODE_ZEN_API_KEY` 不匹配，导致真实运行取不到 key | ✅ Fixed (5.7) |
 
 ---
 
@@ -348,7 +350,35 @@ pub enum ToolExecutionMode {
 - **读取方向**：直接用 Python 风格 v2 wire 格式 JSONL fixture 解析，校验 user/assistant/toolCall/toolResult 角色与内容；另含 v1 裸字符串 `content` 迁移路径解析。
 - **resume 重建**：`CodingSession::load` 加载 Python 风格文件后重建消息并可继续。
 
-测试总数 174 → 179。#3 / #10 / #11 此前已在 5.1 / 5.5 标记 ✅ Fixed，本阶段无需改动。
+测试总数 174 → 180。#3 / #10 / #11 此前已在 5.1 / 5.5 标记 ✅ Fixed，本阶段无需改动。
+
+---
+
+## Phase 5.7 — 真实 API 端到端验证（已完成 ✅ Done, 2026-07-19）
+
+用 OpenCode 免费模型（`-P opencode`，真实 `OPENCODE_ZEN_API_KEY`）跑真实编程场景，验证工具循环、编译-修复、session resume 与 wire 格式，并修复了两个真实运行才暴露的问题（#17、#18）。
+
+### 验证场景与结果
+
+| 场景 | 模型 | 结果 | 耗时 | 备注 |
+|------|------|------|------|------|
+| 连通性冒烟（`Reply with: OK`） | nemotron-3-ultra-free | ✅ OK | — | |
+| 连通性冒烟 | north-mini-code-free | ✅ OK | — | |
+| 连通性冒烟 | mimo-v2.5-free / deepseek-v4-flash-free | ⚠️ 429 限流 | — | 免费 tier 偶发限流，2 次重试后耗尽 |
+| **构建线程安全 LRU 缓存 crate**（write + cargo test + 自动修复编译错误） | nemotron-3-ultra-free | ✅ **10/10 测试通过** | ~72s | 完整工具循环：cargo new → write → cargo test(失败) → edit 修复 → 重跑通过 |
+| **在已有 crate 上加 contains_key/clear + 测试** | north-mini-code-free | ⚠️ 模型未收敛（留类型注解错误） | ~54s | 工具循环正常（read→edit→cargo check），但模型未修完即触发尾随限流 |
+| **resume 修复上一轮遗留错误** | nemotron-3-ultra-free | ✅ **18/18 测试通过** | ~39s | `--resume latest` 正确加载含未完工编辑的 session 并续做 |
+
+### 关键发现
+
+- **工具循环健壮**：read / write / edit / bash(cargo) 在真实文件系统上全程正常工作；模型产生的编译错误被 `edit` 工具 + 重跑 `cargo test` 闭环自动修复（场景一）。
+- **session 持久化 + resume 可用**：场景三通过 `--resume latest` 接续半完工的会话并完成任务，验证 CodingSession 的 load/续跑（5.2）。
+- **免费 tier 限流**：`mimo-v2.5-free` / `deepseek-v4-flash-free` 在冷启时易 429；`nemotron-3-ultra-free` / `north-mini-code-free` 更稳。重试次数（默认 2）偏少，长任务偶发尾随空响应（顶层 `no content received` 是限流而非逻辑错误）。建议在后续把 OpenAI provider 的 `max_retries` 默认提高、并区分 429 的更长退避。
+
+### 修复的缺陷
+
+- **#17**：`tau-ai/src/openai.rs` 流式聚合时，`ResponseEnd` 的 `AssistantMessage` 未回填解析到的 `model`（仅 `ResponseStart`/`message_update` 有）。导致持久化的 `MessageEnd` / `turn_end` 写出 `model:"unknown"`。现已在 `openai.rs` 增加 `resolved_model` 跟踪并在两处 `ResponseEnd` 用 `..Default::default()` + `model` 构造，顶层 `message_end` 已正确带 `model:"nemotron-3-ultra-free"`。
+- **#18**：catalog 中 `opencode` / `opencode-go` 的 `api_key_env` 为 `OPENCODE_API_KEY`，与 `.env` 实际的 `OPENCODE_ZEN_API_KEY` 不符，真实运行取不到 key。已统一改为 `OPENCODE_ZEN_API_KEY`。
 
 ---
 
