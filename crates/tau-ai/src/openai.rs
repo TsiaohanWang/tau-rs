@@ -12,7 +12,10 @@ use tau_agent::tool::AgentTool;
 use tau_types::{AgentMessage, AssistantMessage, ToolCall};
 
 use crate::http::{HttpClientConfig, build_client};
-use crate::retry::{is_retryable_status, retry_delay_seconds, wait_for_retry};
+use crate::retry::{
+    is_retryable_status, rate_limit_delay_seconds, retry_after_seconds, retry_delay_seconds,
+    wait_for_retry,
+};
 use crate::stream::ProviderEvent;
 use tracing::warn;
 
@@ -111,15 +114,27 @@ impl OpenAIProvider {
                 match response {
                     Ok(resp) if resp.status().as_u16() >= 400 => {
                         let status = resp.status().as_u16();
+                        let retry_after = retry_after_seconds(resp.headers());
                         let body = resp.text().await.unwrap_or_default();
                         if is_retryable_status(status) && attempt < config.max_retries {
-                            let delay = retry_delay_seconds(attempt, config.max_retry_delay_seconds);
+                            // Rate-limit (429) gets a longer, Retry-After-aware
+                            // backoff so free tiers don't burn attempts instantly.
+                            let delay = if status == 429 {
+                                rate_limit_delay_seconds(
+                                    attempt,
+                                    retry_after,
+                                    config.max_retry_delay_seconds,
+                                )
+                            } else {
+                                retry_delay_seconds(attempt, config.max_retry_delay_seconds)
+                            };
                             warn!(
                                 provider = config.provider_name,
                                 status,
                                 attempt,
                                 max = config.max_retries,
                                 delay_secs = delay,
+                                retry_after = ?retry_after,
                                 "retryable HTTP error, retrying"
                             );
                             attempt += 1;

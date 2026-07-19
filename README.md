@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-180%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-184%20passing-brightgreen)](#testing)
 
 ---
 
@@ -406,16 +406,16 @@ cargo fmt --check
 
 ### Testing Strategy
 
-The test suite includes **180 tests** across unit, integration, and wiremock levels:
+The test suite includes **184 tests** across unit, integration, and wiremock levels:
 
 | Crate | Unit Tests | Integration Tests | Total |
 |---|---|---|---|
 | `tau-types` | 4 | — | 4 |
 | `tau-agent` | 10 | 11 (loop + harness) | 21 |
-| `tau-ai` | 18 | 10 (wiremock HTTP mocks) | 28 |
+| `tau-ai` | 22 (incl. retry/backoff unit tests) | 10 (wiremock HTTP mocks) | 32 |
 | `tau-coding` | 99 (tools + session + catalog + context_window + compaction + compaction_prompts + naming + commands + shell_escape + prompt + repair + render) | 10 (coding session e2e + compat) | 109 |
 | `tau-cli` | 8 (render module + subprocess CLI tests) | 10 (subprocess CLI tests) | 18 |
-| **Total** | **139** | **41** | **180** |
+| **Total** | **143** | **45** | **184** |
 
 **Integration test patterns**:
 - `tau-ai` tests use [wiremock](https://github.com/LukeMathWalker/wiremock-rs) to mock HTTP responses and verify SSE parsing + retry behavior
@@ -465,7 +465,7 @@ tau-rs has been exercised end-to-end against the **OpenCode free tier** (`-P ope
 - **Resume across an incomplete edit** (`north-mini-code-free` left a type-annotation error): `--resume latest` loaded the half-finished session and completed it to **18/18 tests passing** (~39s) — validates session persistence + continuation.
 - **`--format json`** emits the full agent event stream; the final `message_end` / `turn_end` now correctly carry the resolved `model` (previously `"unknown"` — fixed in 5.7, see `docs/architecture-issues.md` #17).
 
-The OpenCode free models rotate (`deepseek-v4-flash-free`, `mimo-v2.5-free`, `nemotron-3-ultra-free`, `north-mini-code-free`); some are rate-limited on cold start, so retries/higher `max_retries` are recommended for long tasks.
+The OpenCode free models rotate (`deepseek-v4-flash-free`, `mimo-v2.5-free`, `nemotron-3-ultra-free`, `north-mini-code-free`); some are rate-limited on cold start. tau-rs applies a dedicated **429 backoff** (base 2s, honors the server `Retry-After` header, capped at 60s) and retries up to 5 times by default — so transient rate limits are absorbed automatically. A hard account-level limit (the API may return `Retry-After` of many hours) is reported as a graceful failure rather than an infinite wait.
 
 ---
 

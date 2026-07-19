@@ -27,6 +27,7 @@
 | 16 | 🟡 P2 | 5.4 遗留：`/model`/`/provider` 仅内存切 + 标题未回填 `SessionInfo.title` | 🚧 Partial (推迟) |
 | 17 | 🟡 P2 | `AssistantMessage` 最终 `MessageEnd`/`turn_end` 的 `model` 字段为 `"unknown"`（流式 `message_update` 有真实 model，但 `ResponseEnd` 聚合消息未回填解析到的 model） | ✅ Fixed (5.7 真实 API 验证) |
 | 18 | 🟡 P2 | catalog `opencode`/`opencode-go` 的 `api_key_env` 为 `OPENCODE_API_KEY`，与实际 `.env` 的 `OPENCODE_ZEN_API_KEY` 不匹配，导致真实运行取不到 key | ✅ Fixed (5.7) |
+| 19 | 🟡 P2 | 429 限流与通用 5xx 用同一退避曲线（base 0.5s），免费 tier 冷启 429 在 2 次重试内即耗尽；未读取 `Retry-After` | ✅ Fixed (5.8 退避增强) |
 
 ---
 
@@ -379,6 +380,30 @@ pub enum ToolExecutionMode {
 
 - **#17**：`tau-ai/src/openai.rs` 流式聚合时，`ResponseEnd` 的 `AssistantMessage` 未回填解析到的 `model`（仅 `ResponseStart`/`message_update` 有）。导致持久化的 `MessageEnd` / `turn_end` 写出 `model:"unknown"`。现已在 `openai.rs` 增加 `resolved_model` 跟踪并在两处 `ResponseEnd` 用 `..Default::default()` + `model` 构造，顶层 `message_end` 已正确带 `model:"nemotron-3-ultra-free"`。
 - **#18**：catalog 中 `opencode` / `opencode-go` 的 `api_key_env` 为 `OPENCODE_API_KEY`，与 `.env` 实际的 `OPENCODE_ZEN_API_KEY` 不符，真实运行取不到 key。已统一改为 `OPENCODE_ZEN_API_KEY`。
+
+---
+
+## Phase 5.8 — 429 限流退避增强（已完成 ✅ Done, 2026-07-19）
+
+真实运行（5.7）暴露：OpenCode 免费模型冷启频繁 429，而原退避对 429 与 5xx 一视同仁（base 0.5s、2 次重试），长任务尾随空响应。本阶段增强 `tau-ai` 的退避逻辑。
+
+### 实现
+
+- `crates/tau-ai/src/retry.rs` 新增：
+  - `rate_limit_delay_seconds(attempt, retry_after, max)`：429 专用曲线（base **2.0s** 指数增长，上限 60s），并**优先采用服务端 `Retry-After`**（delta-seconds 形式）。
+  - `retry_after_seconds(headers)`：从响应头解析 `Retry-After`；HTTP-date 形式返回 `None`（回退到计算曲线）。
+  - jitter `[0, 0.5]` 避免并发重试同步。
+- `crates/tau-ai/src/openai.rs`：HTTP 错误分支中 `status == 429` 走 `rate_limit_delay_seconds`（带 `Retry-After`），其余可重试状态仍用原 `retry_delay_seconds`；日志新增 `retry_after` 字段。
+- `crates/tau-cli/src/main.rs`：默认 `max_retries` 由 **2 → 5**，给更长退避留出重试空间。
+
+### 真实验证
+
+- 对冷启 429 的 `deepseek-v4-flash-free` 跑 `-v`：日志显示 `status=429 delay_secs=60.0 retry_after=Some(56677.0)` —— 服务端返回 `Retry-After: 56677`（≈15.7h 账号级限流窗口），tau-rs 正确钳制到 60s 上限并在 5 次后优雅失败（账号被临时封锁，非瞬时抖动，属预期）。
+- 稳定模型 `nemotron-3-ultra-free` 仍正常返回，退避增强不影响正常路径。
+
+### 新增测试
+
+`retry.rs` 增加 4 个单测：`rate_limit_backoff_is_longer_than_generic` / `rate_limit_backoff_grows_and_caps` / `rate_limit_honors_retry_after` / `retry_after_parsing`。测试总数 180 → 184。
 
 ---
 

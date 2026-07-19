@@ -151,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
             let system: Option<String> = cli.system.clone();
 
             let prefs = providers.provider_preferences.get(provider_name);
-            let max_retries = prefs.and_then(|p| p.max_retries).unwrap_or(2);
+            let max_retries = prefs.and_then(|p| p.max_retries).unwrap_or(5);
             let timeout = prefs
                 .and_then(|p| p.timeout_seconds)
                 .map(|s| s as u64)
