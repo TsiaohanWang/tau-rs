@@ -386,26 +386,202 @@ crates/
 
 ### Build & Test
 
+#### Prerequisites
+
+- Rust toolchain **1.85+** (uses edition 2024、`async fn in trait`)
+- Optional for real API testing: an API key for a supported provider
+
 ```bash
-# Build all crates
+# Check toolchain version
+rustc --version   # must be ≥ 1.85
+```
+
+#### Quick Start (Free Tier)
+
+```bash
+# 1. Get a free OpenCode Zen API key from https://opencode.ai/docs
+# 2. Set it as an environment variable (or use a .env file)
+export OPENCODE_ZEN_API_KEY="sk-..."
+# 3. Build and run
+cargo run --release -p tau-cli -- -P opencode -p "Write a Rust fibonacci function"
+```
+
+The project includes a `.env` file for local development (not committed to git).  
+`main.rs` calls `dotenvy::dotenv()` on startup to load `OPENCODE_ZEN_API_KEY` and other keys.
+
+#### Build
+
+```bash
+# Debug build (fast compile, with debug info)
 cargo build --workspace
 
-# Run all tests (including integration tests that need the "testing" feature)
-cargo test --workspace --features tau-agent/testing
+# Release build (optimized)
+cargo build --workspace --release
 
-# Run specific crate tests
+# ===== TUI (ratatui, feature-gated) =====
+
+# Build with TUI
+cargo build -p tau-cli --features tui --release
+
+# Verify TUI binary
+./target/release/tau --help | grep tui
+# Should show: --tui  Use the interactive ratatui TUI
+
+# Without tui feature, ratatui/crossterm are NOT compiled
+cargo tree --workspace 2>/dev/null | grep -i ratatui
+# (empty output = ratatui not pulled)
+```
+
+#### Run All Tests
+
+```bash
+# Default (193 tests — TUI module excluded without "tui" feature)
+cargo test --workspace
+
+# With TUI feature (198 tests — includes 5 TUI adapter tests)
+cargo test --workspace --features tui
+
+# ===== Run specific crate tests =====
 cargo test -p tau-types
-cargo test -p tau-agent --features testing
-cargo test -p tau-ai
+cargo test -p tau-agent --features testing     # FakeProvider requires "testing" feature
+cargo test -p tau-ai                           # SSE + retry + wiremock integration
 cargo test -p tau-coding
 cargo test -p tau-cli
+```
 
-# Clippy lint (enforced: warnings are errors)
-cargo clippy --workspace --all-targets --features tau-agent/testing -- -D warnings
+#### Linting & Formatting
 
+```bash
 # Format check
 cargo fmt --check
+
+# Format auto-fix
+cargo fmt
+
+# Clippy lint (default features)
+cargo clippy --workspace --all-targets
+
+# Clippy with TUI feature
+cargo clippy --workspace --all-targets --features tui
 ```
+
+> The project passes clippy with **zero warnings** in both configurations.
+> No `-D warnings` gate is enforced in CI; manual discipline ensures cleanliness.
+
+#### Run the Agent
+
+##### 1. Print mode (one-shot, non-interactive)
+
+```bash
+# With free OpenCode Zen key
+cargo run --release -p tau-cli -- -P opencode -p "Your prompt here"
+
+# Using environment variable or .env
+./target/release/tau -P opencode -p "List files in the current directory"
+
+# With verbose logging
+./target/release/tau -P opencode -v -p "Create a Rust hello world"
+
+# Specify output format
+./target/release/tau -P opencode --format json -p "..."
+./target/release/tau -P opencode --format transcript -p "..."
+
+# Resume a previous session
+./target/release/tau -P opencode --resume latest -p "Continue..."
+# or by session ID
+./target/release/tau -P opencode --resume <session-id>
+```
+
+##### 2. REPL mode (interactive line editor)
+
+```bash
+# Start interactive REPL
+./target/release/tau -P opencode
+
+# In REPL:
+#   /help              — list commands
+#   /model <name>      — switch model (in-memory)
+#   /provider <name>   — switch provider (in-memory)
+#   /thinking [level]  — view/set thinking level (off/minimal/low/medium/high/xhigh)
+#   /compact           — manually compact context
+#   /clear             — clear in-memory messages
+#   /exit              — quit
+#   ! command          — run shell command
+#   !!                 — repeat last shell command
+#   Ctrl-C             — clear context
+#   Ctrl-D             — exit
+#   Tab                — auto-complete (slash commands / tool names / file paths)
+#   Enter during run   — steer (send follow-up to running agent)
+```
+
+##### 3. TUI mode (ratatui, requires `--features tui`)
+
+```bash
+# Build with TUI
+cargo build -p tau-cli --features tui --release
+
+# Run TUI (must be in a REAL terminal: gnome-terminal / wezterm / tmux / etc.)
+./target/release/tau -P opencode --tui
+
+# TUI Key Bindings:
+# =================  Idle  =================
+#   Enter              send prompt
+#   Esc / Ctrl-C       (no-op when idle)
+#   Ctrl-D             quit
+#   Ctrl-O             toggle tool results expanded/collapsed
+#   Ctrl-T             toggle thinking blocks visible/hidden
+#   Ctrl-L             scroll to latest (auto-scroll re-enable)
+#   PageUp / ↑         scroll up
+#   PageDown / ↓       scroll down
+#   Backspace / ← / →  edit input line
+#
+# ==========  During Streaming  ============
+#   Enter              steer (send typed text as follow-up)
+#   Esc / Ctrl-C       cancel current stream
+#   Ctrl-O             toggle tool results
+#   Ctrl-T             toggle thinking
+#   Ctrl-L             scroll to latest
+#   PageUp / ↑         scroll up (auto-scroll disables)
+#   PageDown / ↓       scroll down
+#   (text input)       edit steer message; Enter to send
+```
+
+##### 4. List available providers
+
+```bash
+./target/release/tau providers
+# Shows all providers from the built-in catalog (opencode, anthropic, openai,
+# deepseek, nvidia, xai, xiaomi, github-copilot, ...)
+```
+
+#### API Key Configuration
+
+```bash
+# Option A: environment variable (highest priority)
+export OPENCODE_ZEN_API_KEY="sk-..."
+
+# Option B: .env file in project root (loaded by dotenvy on startup)
+echo 'OPENCODE_ZEN_API_KEY=sk-...' > .env
+
+# Option C: credentials file at ~/.tau/credentials.json
+mkdir -p ~/.tau
+echo '{"opencode": "sk-..."}' > ~/.tau/credentials.json
+
+# Option D: for other providers
+export ANTHROPIC_API_KEY="sk-ant-..."
+export OPENAI_API_KEY="sk-..."
+export DEEPSEEK_API_KEY="sk-..."
+```
+
+#### Troubleshooting
+
+| Symptom | Likely Cause | Fix |
+|---------|-------------|-----|
+| `Error: No such device` on `--tui` | Not running in a real terminal | Use gnome-terminal / wezterm / tmux / Windows Terminal |
+| `HTTP 401/403` | API key not set or invalid | Check `OPENCODE_ZEN_API_KEY` env var or `.env` file |
+| `HTTP 429 Too Many Requests` | Rate limited on free tier | The client has built-in retry (5 attempts, `Retry-After` respect) |
+| `SSE-wrapped error, retrying` | Transient provider error | Auto-retry with exponential backoff; if persists, try a different provider |
+| TUI shows garbled characters | Terminal doesn't support truecolor | WezTerm, iTerm2, Windows Terminal, or gnome-terminal recommended |
 
 ### Testing Strategy
 
