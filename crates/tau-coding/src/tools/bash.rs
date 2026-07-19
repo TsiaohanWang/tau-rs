@@ -179,8 +179,37 @@ pub fn create_tool(cwd: &Path) -> AgentTool {
         ],
         prepare_arguments: None,
         execution_mode: ToolExecutionMode::default(),
-        render_call: None,
-        render_result: None,
+        render_call: Some(Arc::new(|args: &Map<String, Value>| {
+            let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            if cmd.is_empty() {
+                None
+            } else {
+                Some(format!("$ {cmd}"))
+            }
+        })),
+        render_result: Some(Arc::new(|result: &AgentToolResult, _expanded: bool| {
+            let command = result
+                .details
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let exit_code = result
+                .details
+                .get("exit_code")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(-1);
+            let mut out = String::new();
+            if !command.is_empty() {
+                out.push_str(&format!("$ {command} (exit {exit_code})\n"));
+            }
+            let text = result.text();
+            if text.len() > 500 {
+                out.push_str(&format!("{}…", &text[..500]));
+            } else {
+                out.push_str(&text);
+            }
+            Some(out)
+        })),
     }
 }
 

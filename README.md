@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-169%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-174%20passing-brightgreen)](#testing)
 
 ---
 
@@ -406,7 +406,7 @@ cargo fmt --check
 
 ### Testing Strategy
 
-The test suite includes **169 tests** across unit, integration, and wiremock levels:
+The test suite includes **174 tests** across unit, integration, and wiremock levels:
 
 | Crate | Unit Tests | Integration Tests | Total |
 |---|---|---|---|
@@ -414,8 +414,8 @@ The test suite includes **169 tests** across unit, integration, and wiremock lev
 | `tau-agent` | 10 | 11 (loop + harness) | 21 |
 | `tau-ai` | 18 | 10 (wiremock HTTP mocks) | 28 |
 | `tau-coding` | 99 (tools + session + catalog + context_window + compaction + compaction_prompts + naming + commands + shell_escape + prompt + repair) | 4 (coding session e2e) | 103 |
-| `tau-cli` | 3 | 10 (subprocess CLI tests) | 13 |
-| **Total** | **134** | **35** | **169** |
+| `tau-cli` | 8 (render module + subprocess CLI tests) | 10 (subprocess CLI tests) | 18 |
+| **Total** | **139** | **35** | **174** |
 
 **Integration test patterns**:
 - `tau-ai` tests use [wiremock](https://github.com/LukeMathWalker/wiremock-rs) to mock HTTP responses and verify SSE parsing + retry behavior

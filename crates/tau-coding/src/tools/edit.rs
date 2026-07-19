@@ -166,8 +166,18 @@ pub fn create_tool(cwd: &Path) -> AgentTool {
         ],
         prepare_arguments: None,
         execution_mode: ToolExecutionMode::default(),
-        render_call: None,
-        render_result: None,
+        render_call: Some(Arc::new(|args: &Map<String, Value>| {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            if path.is_empty() {
+                None
+            } else {
+                Some(format!("edit {path}"))
+            }
+        })),
+        render_result: Some(Arc::new(|result: &AgentToolResult, _expanded: bool| {
+            let text = result.text();
+            if text.is_empty() { None } else { Some(text) }
+        })),
     }
 }
 

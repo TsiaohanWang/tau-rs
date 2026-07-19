@@ -240,7 +240,7 @@ fn parse_command(line: &str) -> Option<Command> { /* "/…" 前缀 */ }
 
 ---
 
-### 3.5 子阶段 5.5 — 三个渲染器 + 工具事件用 `render_call`/`render_result`（收尾 #11）
+### 3.5 子阶段 5.5 — 三个渲染器 + 工具事件用 `render_call`/`render_result`（收尾 #11）✅ Done
 
 **目标**：CLI `--format plain|json|transcript`；工具事件优先用 tool 的自定义渲染器。
 
@@ -258,6 +258,25 @@ fn parse_command(line: &str) -> Option<Command> { /* "/…" 前缀 */ }
 - 单测三 renderer 对一条固定 `AgentEvent` 序列的输出快照。
 - 单测 `render_tool_event`：有 `render_call` 时用它；无时回退兜底。
 - 手动：`tau-rs --format json -p "list files"` 输出逐行 `jq .` 不报错；`--format transcript` 看上去像聊天记录。
+
+**实现纪要**：
+- `crates/tau-cli/src/render/mod.rs`：`EventRenderer` trait（`on_event` / `flush`）+ 三实现：
+  - `PlainRenderer`：文本走 stdout，工具事件走 stderr。
+  - `JsonEventRenderer`：每 event 一行 `serde_json::to_string(&AgentEvent)` 到 stdout。
+  - `TranscriptRenderer`：`[HH:MM:SS]` 时间戳的紧凑对话（You/Assistant/[tool]）。
+  - `render_tool_start` / `render_tool_end`：查 `tools.iter().find(name)` 用其
+    `render_call`/`render_result`，无则用 `[tool: <name> …]` 兜底。
+  - `build_renderer(format)` 工厂；未知 format 回退 plain；`FORMATS` 用于 `--format` 校验。
+- 四个 coding tool 填上 `render_call`/`render_result`：bash 显示 `$ <cmd>` 与
+  `exit <code>`；read 显示路径与行数；write/edit 显示目标文件与行数。
+- `main.rs`：新增 `--format`（默认 plain，非法值 `bail!`）；四个输出函数
+  （`run_repl` / `run_repl_resumed` / `print_once` / `resume_print_once` /
+  `ephemeral_print`）统一改走 `renderer.on_event`，消除原本两份重复 match 巨块；
+  REPL 非 plain 格式不打印 `You:`/`Assistant:` 提示前缀。
+- 注意 `prompt` 的 stream 持有 `&mut session`，故在 prompt 前先
+  `session.tools().to_vec()` 快照，避免循环内不可变借用冲突。
+
+**验收**：5 个单测覆盖三 renderer 输出快照 + `render_tool_start/end` 有/无 renderer 分支。
 
 ---
 

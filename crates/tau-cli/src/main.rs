@@ -1,4 +1,5 @@
 mod config;
+mod render;
 
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -57,6 +58,10 @@ struct Cli {
     /// Resume a previous session. Pass "latest" or a session ID.
     #[arg(short = 'r', long)]
     resume: Option<String>,
+
+    /// Output format: plain | json | transcript
+    #[arg(long, default_value = "plain")]
+    format: String,
 }
 
 #[derive(Subcommand)]
@@ -92,6 +97,15 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let home = config::TauHome::discover();
+
+    if !render::FORMATS.contains(&cli.format.as_str()) {
+        bail!(
+            "unknown --format '{}' (expected one of: {})",
+            cli.format,
+            render::FORMATS.join(", ")
+        );
+    }
+
     let providers =
         config::ProvidersConfig::load(&home.providers_path()).context("loading providers.json")?;
     let credentials = config::CredentialsConfig::load(&home.credentials_path())
@@ -208,10 +222,20 @@ async fn main() -> anyhow::Result<()> {
                         &cwd,
                         &home,
                         session_id,
+                        &cli.format,
                     )
                     .await?;
                 } else {
-                    print_once(model_provider, system, &prompt, model, &cwd, &home).await?;
+                    print_once(
+                        model_provider,
+                        system,
+                        &prompt,
+                        model,
+                        &cwd,
+                        &home,
+                        &cli.format,
+                    )
+                    .await?;
                 }
             } else {
                 if prompt_text.is_some() {
@@ -227,10 +251,20 @@ async fn main() -> anyhow::Result<()> {
                         &home,
                         cli.verbose,
                         session_id,
+                        &cli.format,
                     )
                     .await?;
                 } else {
-                    run_repl(model_provider, system, model, &cwd, &home, cli.verbose).await?;
+                    run_repl(
+                        model_provider,
+                        system,
+                        model,
+                        &cwd,
+                        &home,
+                        cli.verbose,
+                        &cli.format,
+                    )
+                    .await?;
                 }
             }
         }
@@ -416,6 +450,7 @@ async fn resume_session(
 // REPL
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn run_repl(
     provider: Arc<dyn ModelProvider + Send + Sync>,
     system: Option<String>,
@@ -423,6 +458,7 @@ async fn run_repl(
     cwd: &Path,
     home: &config::TauHome,
     verbose: bool,
+    format: &str,
 ) -> anyhow::Result<()> {
     let stdin = io::stdin();
     let mut reader = stdin.lock().lines();
@@ -437,16 +473,21 @@ async fn run_repl(
     }
 
     let mut prev_shell: Option<String> = None;
+    let plain = format == "plain";
 
     loop {
-        write!(out, "You: ")?;
-        out.flush()?;
+        if plain {
+            write!(out, "You: ")?;
+            out.flush()?;
+        }
 
         let line = match reader.next() {
             Some(Ok(l)) => l,
             Some(Err(e)) => bail!("read error: {e}"),
             None => {
-                writeln!(out)?;
+                if plain {
+                    writeln!(out)?;
+                }
                 break;
             }
         };
@@ -458,44 +499,25 @@ async fn run_repl(
             ReplLineResult::RunPrompt(text) => text,
         };
 
-        write!(out, "Assistant: ")?;
-        out.flush()?;
+        if plain {
+            write!(out, "Assistant: ")?;
+            out.flush()?;
+        }
 
         // `session.prompt` returns a wrapped stream that auto-persists both
         // the user message (pre-run) and each assistant `MessageEnd` event
         // (side effect). The old `persist_message` calls are gone — see
-        // architecture-issues.md #3 closure (ADR-P5-2).
+        // architecture-issues.md #3 closure (ADR-P5-2). Snapshot the tools
+        // up front: the stream holds `&mut session`, so we cannot borrow
+        // `session.tools()` immutably while it is alive.
+        let tools = session.tools().to_vec();
+        let mut renderer = render::build_renderer(format);
         let stream = session.prompt(prompt_text.as_str())?;
         futures::pin_mut!(stream);
         while let Some(event) = stream.next().await {
-            match event {
-                AgentEvent::MessageUpdate(update) => {
-                    if let AssistantMessageEvent::TextDelta(delta) = &update.assistant_message_event
-                    {
-                        write!(out, "{}", delta.delta)?;
-                        out.flush()?;
-                    }
-                }
-                AgentEvent::ToolExecutionStart(start) => {
-                    eprintln!("[tool: {}]", start.tool_name);
-                }
-                AgentEvent::ToolExecutionUpdate(_) => {}
-                AgentEvent::ToolExecutionEnd(end) => {
-                    let preview = end.result.text();
-                    let preview = if preview.len() > 120 {
-                        format!("{}…", &preview[..120])
-                    } else {
-                        preview
-                    };
-                    let status = if end.is_error { " error" } else { "" };
-                    eprintln!("[tool: {}{} → {}]", end.tool_name, status, preview);
-                }
-                AgentEvent::AgentEnd(_) => {
-                    writeln!(out)?;
-                }
-                _ => {}
-            }
+            renderer.on_event(&event, &tools);
         }
+        renderer.flush();
     }
 
     Ok(())
@@ -580,6 +602,7 @@ async fn handle_repl_line(
 // --print mode
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn print_once(
     provider: Arc<dyn ModelProvider + Send + Sync>,
     system: Option<String>,
@@ -587,6 +610,7 @@ async fn print_once(
     model: String,
     cwd: &Path,
     home: &config::TauHome,
+    format: &str,
 ) -> anyhow::Result<()> {
     let mut session = match open_or_create_session(
         provider.clone(),
@@ -602,13 +626,13 @@ async fn print_once(
             // Could not open a session file — fall back to a single-turn
             // ephemeral harness call so `--print` still produces output for
             // pipelines.
-            return ephemeral_print(provider, prompt, cwd).await;
+            return ephemeral_print(provider, prompt, cwd, format).await;
         }
     };
 
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
     let mut got_content = false;
+    let mut renderer = render::build_renderer(format);
+    let tools = session.as_ref().unwrap().tools().to_vec();
 
     // The stream borrows `&mut session`; advance it inside this scope and drop
     // it before `session` itself does. RAII keeps the borrow chain intact.
@@ -616,35 +640,14 @@ async fn print_once(
         let stream = session.as_mut().unwrap().prompt(prompt)?;
         futures::pin_mut!(stream);
         while let Some(event) = stream.next().await {
-            match event {
-                AgentEvent::MessageUpdate(update) => {
-                    if let AssistantMessageEvent::TextDelta(delta) = &update.assistant_message_event
-                    {
-                        got_content = true;
-                        write!(out, "{}", delta.delta)?;
-                        out.flush()?;
-                    }
+            if let AgentEvent::MessageUpdate(update) = &event {
+                if let AssistantMessageEvent::TextDelta(_) = &update.assistant_message_event {
+                    got_content = true;
                 }
-                AgentEvent::ToolExecutionStart(start) => {
-                    eprintln!("[tool: {}]", start.tool_name);
-                }
-                AgentEvent::ToolExecutionUpdate(_) => {}
-                AgentEvent::ToolExecutionEnd(end) => {
-                    let preview = end.result.text();
-                    let preview = if preview.len() > 120 {
-                        format!("{}…", &preview[..120])
-                    } else {
-                        preview
-                    };
-                    let status = if end.is_error { " error" } else { "" };
-                    eprintln!("[tool: {}{} → {}]", end.tool_name, status, preview);
-                }
-                AgentEvent::AgentEnd(_) => {
-                    writeln!(out)?;
-                }
-                _ => {}
             }
+            renderer.on_event(&event, &tools);
         }
+        renderer.flush();
     }
 
     if !got_content {
@@ -659,13 +662,14 @@ async fn ephemeral_print(
     provider: Arc<dyn ModelProvider + Send + Sync>,
     prompt: &str,
     cwd: &Path,
+    format: &str,
 ) -> anyhow::Result<()> {
     let tools = tau_coding::tools::create_coding_tools(cwd);
     let harness = AgentHarness::new(AgentHarnessConfig {
         provider,
         model: String::new(),
         system: tau_coding::prompt::build_system_prompt(&tools, ""),
-        tools,
+        tools: tools.clone(),
         max_turns: Some(20),
         queue_mode: QueueMode::OneAtATime,
         before_tool_call: None,
@@ -673,19 +677,18 @@ async fn ephemeral_print(
     });
     let stream = harness.prompt(prompt)?;
     futures::pin_mut!(stream);
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
     let mut got_content = false;
+    let mut renderer = render::build_renderer(format);
 
     while let Some(event) = stream.next().await {
-        if let AgentEvent::MessageUpdate(update) = event {
-            if let AssistantMessageEvent::TextDelta(delta) = &update.assistant_message_event {
+        if let AgentEvent::MessageUpdate(update) = &event {
+            if let AssistantMessageEvent::TextDelta(_) = &update.assistant_message_event {
                 got_content = true;
-                write!(out, "{}", delta.delta)?;
-                out.flush()?;
             }
         }
+        renderer.on_event(&event, &tools);
     }
+    renderer.flush();
     if !got_content {
         bail!("no content received from provider (possible rate limit or empty response)");
     }
@@ -696,6 +699,7 @@ async fn ephemeral_print(
 // --print mode (resumed session)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn resume_print_once(
     provider: Arc<dyn ModelProvider + Send + Sync>,
     system: Option<String>,
@@ -704,48 +708,28 @@ async fn resume_print_once(
     cwd: &Path,
     home: &config::TauHome,
     session_id: &str,
+    format: &str,
 ) -> anyhow::Result<()> {
     let mut session = resume_session(provider, system, model, cwd.to_path_buf(), home, session_id)
         .await
         .context("resuming session for --print")?;
 
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
     let mut got_content = false;
+    let mut renderer = render::build_renderer(format);
+    let tools = session.tools().to_vec();
 
     {
         let stream = session.prompt(prompt)?;
         futures::pin_mut!(stream);
         while let Some(event) = stream.next().await {
-            match event {
-                AgentEvent::MessageUpdate(update) => {
-                    if let AssistantMessageEvent::TextDelta(delta) = &update.assistant_message_event
-                    {
-                        got_content = true;
-                        write!(out, "{}", delta.delta)?;
-                        out.flush()?;
-                    }
+            if let AgentEvent::MessageUpdate(update) = &event {
+                if let AssistantMessageEvent::TextDelta(_) = &update.assistant_message_event {
+                    got_content = true;
                 }
-                AgentEvent::ToolExecutionStart(start) => {
-                    eprintln!("[tool: {}]", start.tool_name);
-                }
-                AgentEvent::ToolExecutionUpdate(_) => {}
-                AgentEvent::ToolExecutionEnd(end) => {
-                    let preview = end.result.text();
-                    let preview = if preview.len() > 120 {
-                        format!("{}…", &preview[..120])
-                    } else {
-                        preview
-                    };
-                    let status = if end.is_error { " error" } else { "" };
-                    eprintln!("[tool: {}{} → {}]", end.tool_name, status, preview);
-                }
-                AgentEvent::AgentEnd(_) => {
-                    writeln!(out)?;
-                }
-                _ => {}
             }
+            renderer.on_event(&event, &tools);
         }
+        renderer.flush();
     }
 
     if !got_content {
@@ -758,6 +742,7 @@ async fn resume_print_once(
 // REPL (resumed session)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn run_repl_resumed(
     provider: Arc<dyn ModelProvider + Send + Sync>,
     system: Option<String>,
@@ -766,6 +751,7 @@ async fn run_repl_resumed(
     home: &config::TauHome,
     verbose: bool,
     session_id: &str,
+    format: &str,
 ) -> anyhow::Result<()> {
     let stdin = io::stdin();
     let mut reader = stdin.lock().lines();
@@ -784,16 +770,21 @@ async fn run_repl_resumed(
     }
 
     let mut prev_shell: Option<String> = None;
+    let plain = format == "plain";
 
     loop {
-        write!(out, "You: ")?;
-        out.flush()?;
+        if plain {
+            write!(out, "You: ")?;
+            out.flush()?;
+        }
 
         let line = match reader.next() {
             Some(Ok(l)) => l,
             Some(Err(e)) => bail!("read error: {e}"),
             None => {
-                writeln!(out)?;
+                if plain {
+                    writeln!(out)?;
+                }
                 break;
             }
         };
@@ -805,40 +796,19 @@ async fn run_repl_resumed(
             ReplLineResult::RunPrompt(text) => text,
         };
 
-        write!(out, "Assistant: ")?;
-        out.flush()?;
+        if plain {
+            write!(out, "Assistant: ")?;
+            out.flush()?;
+        }
 
+        let tools = session.tools().to_vec();
+        let mut renderer = render::build_renderer(format);
         let stream = session.prompt(prompt_text.as_str())?;
         futures::pin_mut!(stream);
         while let Some(event) = stream.next().await {
-            match event {
-                AgentEvent::MessageUpdate(update) => {
-                    if let AssistantMessageEvent::TextDelta(delta) = &update.assistant_message_event
-                    {
-                        write!(out, "{}", delta.delta)?;
-                        out.flush()?;
-                    }
-                }
-                AgentEvent::ToolExecutionStart(start) => {
-                    eprintln!("[tool: {}]", start.tool_name);
-                }
-                AgentEvent::ToolExecutionUpdate(_) => {}
-                AgentEvent::ToolExecutionEnd(end) => {
-                    let preview = end.result.text();
-                    let preview = if preview.len() > 120 {
-                        format!("{}…", &preview[..120])
-                    } else {
-                        preview
-                    };
-                    let status = if end.is_error { " error" } else { "" };
-                    eprintln!("[tool: {}{} → {}]", end.tool_name, status, preview);
-                }
-                AgentEvent::AgentEnd(_) => {
-                    writeln!(out)?;
-                }
-                _ => {}
-            }
+            renderer.on_event(&event, &tools);
         }
+        renderer.flush();
     }
 
     Ok(())

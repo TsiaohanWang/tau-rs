@@ -101,8 +101,20 @@ pub fn create_tool(cwd: &Path) -> AgentTool {
         prompt_guidelines: vec![],
         prepare_arguments: None,
         execution_mode: ToolExecutionMode::default(),
-        render_call: None,
-        render_result: None,
+        render_call: Some(Arc::new(|args: &Map<String, Value>| {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            if path.is_empty() {
+                None
+            } else {
+                let lines = content.split('\n').count();
+                Some(format!("write {path} ({lines} lines)"))
+            }
+        })),
+        render_result: Some(Arc::new(|result: &AgentToolResult, _expanded: bool| {
+            let text = result.text();
+            if text.is_empty() { None } else { Some(text) }
+        })),
     }
 }
 

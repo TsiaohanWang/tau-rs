@@ -19,7 +19,7 @@
 | 8 | 🟡 P2 | 无 compaction — `apply_compaction` 存在但无生成代码 | ✅ Fixed |
 | 9 | 🟡 P2 | main.rs 重复 provider 构造块 — print/REPL 两段近乎相同的 match | ✅ Fixed |
 | 10 | 🟡 P2 | 硬编码 system prompt + 未组装 tool prompt 片段 | ✅ Fixed (5.1) |
-| 11 | 🟡 P2 | REPL 忽略工具事件 — 用户看不到 agent 在做什么 | 🚧 Partial (5.5 收尾) |
+| 11 | 🟡 P2 | REPL 忽略工具事件 — 用户看不到 agent 在做什么 | ✅ Fixed (5.5) |
 | 12 | 🟡 P2 | `cli_verbose()` 读 TAU_VERBOSE 环境变量反模式 | ✅ Fixed |
 | 13 | 🟡 P2 | IO 风格混用 — `SessionManager` 同步 `std::fs` + `JsonlSessionStorage` async tokio + `block_on` 嵌套 | ✅ Fixed |
 | 14 | 🟢 P3 | 死字段 `ToolExecutionMode` — 定义但从未读取 | ✅ Fixed |
@@ -244,6 +244,8 @@ Verified with live `--print` against `opencode/deepseek-v4-flash-free` (entries 
 
 **Partial fix (2026-07-19)**: `run_repl`, `print_once`, `run_repl_resumed`, and `resume_print_once` all handle `ToolExecutionStart` and `ToolExecutionEnd` via `eprintln!`, showing tool name and truncated result on stderr. However, `render_call`/`render_result` from `AgentTool` are not yet used — the format is hardcoded. Remaining: use tool's custom renderers when available.
 
+**Full fix (Phase 5.5, 2026-07-19)**: Introduced `crates/tau-cli/src/render/mod.rs` with an `EventRenderer` trait and three implementations (`PlainRenderer`, `JsonEventRenderer`, `TranscriptRenderer`). Tool events now route through `render_tool_start`/`render_tool_end`, which look up each tool's `render_call`/`render_result` renderer (when present) and fall back to `[tool: <name> …]` otherwise. All four coding tools (`bash`/`read`/`write`/`edit`) received concrete `render_call`/`render_result` implementations. The four CLI output functions converge on `renderer.on_event(&ev, &tools)`, eliminating the duplicated match blocks. Issue closed.
+
 ---
 
 ### Issue #12: cli_verbose() 反模式
@@ -316,7 +318,7 @@ pub enum ToolExecutionMode {
 
 **Impact**: Misleading for contributors evaluating project health.
 
-**Fix**: Updated all docs to current 169 count.
+**Fix**: Updated all docs to current 174 count.
 
 ---
 
