@@ -520,12 +520,12 @@ OAuth 交互流、openai-codex provider、google/mistral 适配器、responses A
 | `tau-agent` | 10 | 11 | 21 |
 | `tau-ai` | 18 | 10 | 28 |
 | `tau-cli` | 3 | 10 | 13 |
-| `tau-coding` | 64 | — | 64 |
-| **总计** | **99** | **31** | **130** |
+| `tau-coding` | 72 | 4 | 76 |
+| **总计** | **107** | **35** | **142** |
 
 ### 待实现测试（Phase 4 → 已完成）
 
-Phase 4 测试已全部落地（storage 4 + manager 4 + catalog 3 = 11 测试，已含于 `tau-coding` 64 单元测试中）。
+Phase 4 测试已全部落地（storage 4 + manager 6 + catalog 3 = 13 测试，已含于 `tau-coding` 72 单元测试中）。
 
 ## 6.5 已支持的 Provider
 

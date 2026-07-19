@@ -1,17 +1,11 @@
-//! Phase 5.1 — CodingSession auto-persistence end-to-end test.
-//!
-//! Drives a real `AgentHarness` backed by `FakeProvider` through
-//! `CodingSession::prompt` and verifies that:
-//!   - the user prompt and assistant reply both land in the JSONL file;
-//!   - the `parent_id` chain weaves user → assistant correctly;
-//!   - the harness is the sole driver of persistence (no manual persist
-//!     calls happen pre-run).
+//! Phase 5 — CodingSession end-to-end + load/resume tests.
 
 use std::sync::Arc;
 
 use futures::StreamExt;
 use tau_agent::provider::ModelProvider;
 use tau_agent::testing::FakeProvider;
+use tau_coding::session::repair_interrupted_tool_calls;
 use tau_coding::session::{CodingSession, CodingSessionConfig, JsonlSessionStorage};
 
 fn text_done(message: tau_types::AssistantMessage) -> tau_types::AssistantMessageEvent {
@@ -58,11 +52,9 @@ async fn prompt_persists_user_and_assistant_with_parent_chain() {
         let stream = session.prompt("hello").unwrap();
         futures::pin_mut!(stream);
         while let Some(_ev) = stream.next().await {}
-        // Stream dropped at end of this block, releasing the `&mut session`.
     }
 
     let entries = session.storage().read_all().await.unwrap();
-    // session_info + user message + leaf + assistant message + leaf
     assert_eq!(entries.len(), 5);
 
     let user_idx = entries
@@ -96,12 +88,11 @@ async fn prompt_persists_multiple_turns_chaining_off_previous_assistant() {
             tau_types::TextContent::new(text),
         ));
         a.stop_reason = tau_types::StopReason::Stop;
-        let events = vec![
+        vec![
             tau_agent::testing::assistant_start(None, None),
             tau_agent::testing::text_delta(text),
             text_done(a.clone()),
-        ];
-        events
+        ]
     };
 
     let batch1 = make_assistant("reply one");
@@ -122,13 +113,11 @@ async fn prompt_persists_multiple_turns_chaining_off_previous_assistant() {
     let mut session = CodingSession::new(storage, cfg);
     session.write_session_info().await.unwrap();
 
-    // Turn 1
     {
         let stream = session.prompt("turn 1").unwrap();
         futures::pin_mut!(stream);
         while let Some(_ev) = stream.next().await {}
     }
-    // Turn 2
     {
         let stream = session.prompt("turn 2").unwrap();
         futures::pin_mut!(stream);
@@ -137,11 +126,10 @@ async fn prompt_persists_multiple_turns_chaining_off_previous_assistant() {
 
     let entries = session.storage().read_all().await.unwrap();
     let ids: Vec<String> = entries.iter().map(|e| e.id().to_string()).collect();
-    assert!(ids[0].len() == 32, "expected uuid length");
-    // events: session_info, user, leaf, assistant, leaf, user, leaf, assistant, leaf
+    assert_eq!(ids[0].len(), 32, "expected uuid length");
+    // sessions_info + (user, leaf, assistant, leaf) x 2 turns = 9
     assert_eq!(entries.len(), 9);
 
-    // Walk MessageEntries and confirm parent_id points to the previous message.
     let msgs: Vec<(&str, Option<&str>)> = entries
         .iter()
         .filter_map(|e| match e {
@@ -165,4 +153,158 @@ async fn prompt_persists_multiple_turns_chaining_off_previous_assistant() {
             ("assistant", Some(ids[5].as_str())),
         ]
     );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5.2 — session load / resume
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn load_reconstructs_prior_conversation_in_harness_messages() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let storage = JsonlSessionStorage::new(dir.path().join("resume.jsonl"));
+
+    let mut first_assistant = tau_types::AssistantMessage::default();
+    first_assistant
+        .content
+        .push(tau_types::AssistantContent::Text(
+            tau_types::TextContent::new("ok"),
+        ));
+    first_assistant.stop_reason = tau_types::StopReason::Stop;
+
+    let first_events = vec![
+        tau_agent::testing::assistant_start(None, None),
+        tau_agent::testing::text_delta("ok"),
+        text_done(first_assistant.clone()),
+    ];
+
+    let provider_first: Arc<dyn ModelProvider + Send + Sync> =
+        Arc::new(FakeProvider::with_events(first_events));
+    let mut session = CodingSession::new(
+        JsonlSessionStorage::new(storage.path().to_path_buf()),
+        CodingSessionConfig {
+            provider: provider_first,
+            model: "fake".into(),
+            system: None,
+            cwd: dir.path().to_path_buf(),
+            max_turns: Some(2),
+            context_window: None,
+            compaction_reserve: 16384,
+        },
+    );
+    session.write_session_info().await.unwrap();
+    {
+        let stream = session.prompt("first message").unwrap();
+        futures::pin_mut!(stream);
+        while let Some(_ev) = stream.next().await {}
+    }
+    drop(session);
+
+    // Now `load` the same file.
+    let loaded = CodingSession::load(
+        JsonlSessionStorage::new(storage.path().to_path_buf()),
+        CodingSessionConfig {
+            provider: Arc::new(FakeProvider::with_events(vec![text_done(
+                first_assistant.clone(),
+            )])) as _,
+            model: "fake".into(),
+            system: None,
+            cwd: dir.path().to_path_buf(),
+            max_turns: Some(2),
+            context_window: None,
+            compaction_reserve: 16384,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Loaded harness messages should contain the original user + assistant.
+    let msgs = loaded.messages();
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, tau_types::AgentMessage::User(_))),
+        "loaded session must see the prior user message"
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, tau_types::AgentMessage::Assistant(_))),
+        "loaded session must see the prior assistant message"
+    );
+
+    // A new prompt on the resumed session chains off the persisted tail:
+    // first event persisted (the user MessageEntry) should have a real
+    // parent_id (not None), because `last_entry_id` was hydrated by load.
+    let mut resumed = loaded;
+    {
+        let mut a = tau_types::AssistantMessage::default();
+        a.content.push(tau_types::AssistantContent::Text(
+            tau_types::TextContent::new("two"),
+        ));
+        a.stop_reason = tau_types::StopReason::Stop;
+        let events = vec![text_done(a)];
+        // Replace provider in the running harness — easiest path is to drop
+        // and re-load with a brand-new FakeProvider that serves the next reply.
+        let provider_next: Arc<dyn ModelProvider + Send + Sync> =
+            Arc::new(FakeProvider::with_events(events));
+        let cfg = CodingSessionConfig {
+            provider: provider_next,
+            model: "fake".into(),
+            system: None,
+            cwd: dir.path().to_path_buf(),
+            max_turns: Some(2),
+            context_window: None,
+            compaction_reserve: 16384,
+        };
+        // Swap provider & rebuild: easiest re-load (load keeps the file as-is).
+        // This relies on `load` reconstructing from the file — the harness
+        // provider is whatever we pass to `load`, so we re-load once more.
+        drop(resumed);
+        resumed = CodingSession::load(JsonlSessionStorage::new(storage.path().to_path_buf()), cfg)
+            .await
+            .unwrap();
+    }
+    {
+        let stream = resumed.prompt("second message").unwrap();
+        futures::pin_mut!(stream);
+        while let Some(_ev) = stream.next().await {}
+    }
+
+    let entries = resumed.storage().read_all().await.unwrap();
+    let last_user_msg = entries
+        .iter()
+        .rev()
+        .find(|e| matches!(e, tau_types::SessionEntry::Message(m) if matches!(m.message, tau_types::AgentMessage::User(_))));
+    let last_user = match last_user_msg {
+        Some(tau_types::SessionEntry::Message(m)) => m,
+        _ => panic!("expected a MessageEntry for the second-turn user"),
+    };
+    assert!(
+        last_user.parent_id.is_some(),
+        "second-turn user message must chain off the persisted tail (last_entry_id from load)"
+    );
+}
+
+#[test]
+fn repair_interrupted_tool_call_inserts_synthetic_error_result() {
+    let mut a = tau_types::AssistantMessage::default();
+    a.content
+        .push(tau_types::AssistantContent::ToolCall(tau_types::ToolCall {
+            id: "c1".to_string(),
+            name: "read".to_string(),
+            arguments: serde_json::Map::new(),
+            thought_signature: None,
+            r#type: tau_types::ContentBlockType::ToolCall,
+        }));
+    a.stop_reason = tau_types::StopReason::ToolUse;
+    let mut msgs = vec![
+        tau_types::AgentMessage::User(tau_types::UserMessage::new("go")),
+        tau_types::AgentMessage::Assistant(a),
+    ];
+    let repaired = repair_interrupted_tool_calls(&mut msgs);
+    assert_eq!(repaired, vec!["c1".to_string()]);
+    assert_eq!(msgs.len(), 3);
+    assert!(matches!(
+        &msgs[2],
+        tau_types::AgentMessage::ToolResult(t) if t.is_error && t.tool_call_id == "c1"
+    ));
 }

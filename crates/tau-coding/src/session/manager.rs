@@ -153,6 +153,19 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Return the most-recently-created session for a project, if any.
+    pub async fn latest_for_project(
+        &self,
+        project_dir: &Path,
+    ) -> Result<Option<SessionIndexEntry>, SessionError> {
+        let index = self.load_index(project_dir).await?;
+        Ok(index.into_iter().max_by(|a, b| {
+            a.created_at
+                .partial_cmp(&b.created_at)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }))
+    }
+
     /// List sessions for a project, counted entries each.
     pub async fn list(&self, project_dir: &Path) -> Result<Vec<SessionInfo>, SessionError> {
         let dir = self.prepare(project_dir).await?;
@@ -288,5 +301,50 @@ mod tests {
         let mgr = SessionManager::new(root.path().to_path_buf());
         let project = Path::new("/tmp/no-such");
         assert!(mgr.load_index(project).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn latest_for_project_returns_most_recent_session() {
+        let root = tmp_root();
+        let mgr = SessionManager::new(root.path().to_path_buf());
+        let project = Path::new("/tmp/proj4");
+
+        let (_p1, s1) = mgr.create(project).await.unwrap();
+        s1.append(&tau_types::SessionEntry::Leaf(tau_types::LeafEntry {
+            id: "a".into(),
+            parent_id: None,
+            timestamp: 100.0,
+            r#type: tau_types::EntryType::Leaf,
+            entry_id: None,
+        }))
+        .await
+        .unwrap();
+        // Small sleep so the second session gets a strictly larger created_at.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let (_p2, s2) = mgr.create(project).await.unwrap();
+        s2.append(&tau_types::SessionEntry::Leaf(tau_types::LeafEntry {
+            id: "b".into(),
+            parent_id: None,
+            timestamp: 200.0,
+            r#type: tau_types::EntryType::Leaf,
+            entry_id: None,
+        }))
+        .await
+        .unwrap();
+
+        let latest = mgr.latest_for_project(project).await.unwrap().unwrap();
+        assert_eq!(
+            latest.session_id,
+            _p2.file_stem().unwrap().to_string_lossy(),
+            "latest_for_project should return the second session"
+        );
+    }
+
+    #[tokio::test]
+    async fn latest_for_project_returns_none_when_empty() {
+        let root = tmp_root();
+        let mgr = SessionManager::new(root.path().to_path_buf());
+        let project = Path::new("/tmp/empty-proj");
+        assert!(mgr.latest_for_project(project).await.unwrap().is_none());
     }
 }

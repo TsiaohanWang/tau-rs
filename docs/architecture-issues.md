@@ -232,7 +232,7 @@ Verified with live `--print` against `opencode/deepseek-v4-flash-free` (entries 
 
 **Fix**: In the REPL event loop, render `ToolExecutionStart` (show tool name + call ID), `ToolExecutionUpdate` (show partial progress), and `ToolExecutionEnd` (show result summary). Use `tool.render_call` / `tool.render_result` when available. Print to stderr so stdout stays clean for piped output.
 
-**Partial fix (2026-07-19)**: Both `run_repl` and `print_once` now handle `ToolExecutionStart` and `ToolExecutionEnd` via `eprintln!`, showing tool name and truncated result on stderr. However, `render_call`/`render_result` from `AgentTool` are not yet used — the format is hardcoded. Remaining: use tool's custom renderers when available.
+**Partial fix (2026-07-19)**: `run_repl`, `print_once`, `run_repl_resumed`, and `resume_print_once` all handle `ToolExecutionStart` and `ToolExecutionEnd` via `eprintln!`, showing tool name and truncated result on stderr. However, `render_call`/`render_result` from `AgentTool` are not yet used — the format is hardcoded. Remaining: use tool's custom renderers when available.
 
 ---
 
@@ -298,15 +298,15 @@ pub enum ToolExecutionMode {
 ### Issue #15: 文档测试计数不一致
 
 **Location**:
-- `docs/architecture.md` — now 130 tests (fixed)
+- `docs/architecture.md` — now 142 tests (updated)
 - `docs/phase-4.md` — now 149 total including Phase 4 extras (fixed)
-- `README.md` — badge says 130 (fixed)
+- `README.md` — badge says 142 (updated)
 
 **Problem**: `architecture.md` was not updated when Phase 4 landed. The Phase 3 commit updated README but not architecture.md's test count.
 
 **Impact**: Misleading for contributors evaluating project health.
 
-**Fix**: Updated all docs to current 130 count.
+**Fix**: Updated all docs to current 142 count.
 
 ---
 

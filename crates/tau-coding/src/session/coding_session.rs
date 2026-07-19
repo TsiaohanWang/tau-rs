@@ -4,12 +4,14 @@ use async_stream::stream;
 use futures::stream::StreamExt;
 use tau_agent::harness::{AgentHarness, AgentHarnessConfig, QueueMode};
 use tau_agent::provider::ModelProvider;
+use tau_agent::session::state::{LeafSelector, SessionState};
 use tau_agent::tool::AgentTool;
 use tau_types::{AgentEvent, AgentMessage, SessionEntry};
 
 use crate::prompt::build_system_prompt;
 use crate::session::compaction::{CompactionPlan, create_compaction_entry, plan_compaction};
 use crate::session::context_window::{estimate_context_usage, needs_compaction};
+use crate::session::repair::repair_interrupted_tool_calls;
 use crate::session::storage::{JsonlSessionStorage, SessionError};
 use crate::tools::create_coding_tools;
 
@@ -74,6 +76,68 @@ impl CodingSession {
             entry_ids: Vec::new(),
             config,
         }
+    }
+
+    /// Load an existing session from JSONL: read every entry, replay via
+    /// `SessionState::from_entries` (applying any compaction summaries), repair
+    /// any interrupted tool calls, then build a `CodingSession` whose harness
+    /// sees the reconstructed conversation so the next prompt continues it
+    /// rather than starting over.
+    ///
+    /// `last_entry_id` is initialized from the session's latest `LeafEntry`,
+    /// so subsequent `prompt` calls chain their new `MessageEntry` off the
+    /// persisted tail instead of creating orphan roots. See ADR-P5-4.
+    pub async fn load(
+        storage: JsonlSessionStorage,
+        config: CodingSessionConfig,
+    ) -> Result<Self, SessionError> {
+        let entries = storage.read_all().await?;
+        let state = SessionState::from_entries(&entries, LeafSelector::Linear).map_err(|e| {
+            SessionError::Jsonl(tau_agent::session::jsonl::SessionJsonlError {
+                line_number: None,
+                message: format!("session tree walk failed: {e}"),
+            })
+        })?;
+
+        // Reconstruct the in-memory message chain + parallel entry_ids,
+        // then repair any interrupted tool calls in memory.
+        let mut messages = state.messages.clone();
+        let mut entry_ids = state.context_entry_ids.clone();
+        let _ = repair_interrupted_tool_calls(&mut messages);
+        // The repair may have inserted synthetic tool_results that don't have
+        // corresponding entry_ids in the JSONL. Mirror them with placeholder
+        // "rebuilt-..." ids so the parallel-vec invariant holds (these are
+        // in-memory-only and never persisted).
+        while entry_ids.len() < messages.len() {
+            entry_ids.push(format!("rebuilt-{}", entry_ids.len()));
+        }
+
+        let tools: Arc<[AgentTool]> = Arc::from(create_coding_tools(&config.cwd));
+        let assembled_system = build_system_prompt(&tools, config.system.as_deref().unwrap_or(""));
+
+        let harness = AgentHarness::with_messages(
+            AgentHarnessConfig {
+                provider: config.provider.clone(),
+                model: config.model.clone(),
+                system: assembled_system,
+                tools: tools.to_vec(),
+                max_turns: config.max_turns,
+                queue_mode: QueueMode::OneAtATime,
+                before_tool_call: None,
+                after_tool_call: None,
+            },
+            messages.clone(),
+        );
+
+        Ok(Self {
+            storage,
+            harness,
+            tools,
+            last_entry_id: state.active_leaf_id,
+            messages,
+            entry_ids,
+            config,
+        })
     }
 
     pub fn storage(&self) -> &JsonlSessionStorage {

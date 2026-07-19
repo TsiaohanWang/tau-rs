@@ -50,6 +50,10 @@ struct Cli {
     /// Verbose logging
     #[arg(short, long)]
     verbose: bool,
+
+    /// Resume a previous session. Pass "latest" or a session ID.
+    #[arg(short = 'r', long)]
+    resume: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -161,6 +165,25 @@ async fn main() -> anyhow::Result<()> {
                 Some(cli.prompt.join(" "))
             };
 
+            let cwd = std::env::current_dir().context("failed to get current directory")?;
+
+            // Resolve resume target before provider construction so we know
+            // early whether there is something to resume.
+            let resume_id = match cli.resume.as_deref() {
+                Some("latest") | Some("") => {
+                    let sessions_dir = home.root.join("sessions");
+                    let mgr = tau_coding::session::SessionManager::new(sessions_dir);
+                    let entry = mgr
+                        .latest_for_project(&cwd)
+                        .await
+                        .context("looking up latest session")?
+                        .ok_or_else(|| anyhow::anyhow!("no sessions found for this project"))?;
+                    Some(entry.session_id)
+                }
+                Some(id) => Some(id.to_string()),
+                None => None,
+            };
+
             let model_provider = build_provider(
                 kind,
                 &api_key,
@@ -173,15 +196,39 @@ async fn main() -> anyhow::Result<()> {
 
             if cli.print {
                 let prompt = prompt_text.context("--print requires a prompt argument")?;
-                let cwd = std::env::current_dir().context("failed to get current directory")?;
-                print_once(model_provider, system, &prompt, model, &cwd, &home).await?;
+                if let Some(ref session_id) = resume_id {
+                    resume_print_once(
+                        model_provider,
+                        system,
+                        &prompt,
+                        model,
+                        &cwd,
+                        &home,
+                        session_id,
+                    )
+                    .await?;
+                } else {
+                    print_once(model_provider, system, &prompt, model, &cwd, &home).await?;
+                }
             } else {
                 if prompt_text.is_some() {
                     bail!("interactive mode does not accept a prompt; use --print with a prompt");
                 }
-                let cwd = std::env::current_dir().context("failed to get current directory")?;
                 eprintln!("tau-rs ({provider_name}) | type your message (Ctrl-D to exit)");
-                run_repl(model_provider, system, model, &cwd, &home, cli.verbose).await?;
+                if let Some(ref session_id) = resume_id {
+                    run_repl_resumed(
+                        model_provider,
+                        system,
+                        model,
+                        &cwd,
+                        &home,
+                        cli.verbose,
+                        session_id,
+                    )
+                    .await?;
+                } else {
+                    run_repl(model_provider, system, model, &cwd, &home, cli.verbose).await?;
+                }
             }
         }
     }
@@ -323,10 +370,6 @@ async fn open_or_create_session(
         model,
         system,
         cwd,
-        // context_window + auto-compaction threshold: 5.3 will read the
-        // active model's window from the catalog. For now pass `None` so
-        // the threshold trigger is inactive while the rest of the pipeline
-        // is wired (manual /compact lands in 5.4).
         context_window: None,
         compaction_reserve: tau_coding::session::DEFAULT_RESERVE,
         max_turns: Some(20),
@@ -334,6 +377,34 @@ async fn open_or_create_session(
     let mut session = tau_coding::session::CodingSession::new(storage, cfg);
     session.write_session_info().await?;
     Ok(session)
+}
+
+/// Open an existing session by ID from `~/.tau/sessions` and wrap it in a
+/// loaded `CodingSession`. Returns an error if the session does not exist.
+async fn resume_session(
+    provider: Arc<dyn ModelProvider + Send + Sync>,
+    system: Option<String>,
+    model: String,
+    cwd: PathBuf,
+    home: &config::TauHome,
+    session_id: &str,
+) -> anyhow::Result<tau_coding::session::CodingSession> {
+    let sessions_dir = home.root.join("sessions");
+    let mgr = tau_coding::session::SessionManager::new(sessions_dir);
+    let storage = mgr.load(&cwd, session_id).await?;
+
+    let cfg = tau_coding::session::CodingSessionConfig {
+        provider,
+        model,
+        system,
+        cwd,
+        context_window: None,
+        compaction_reserve: tau_coding::session::DEFAULT_RESERVE,
+        max_turns: Some(20),
+    };
+    tau_coding::session::CodingSession::load(storage, cfg)
+        .await
+        .context("loading resumed session")
 }
 
 // ---------------------------------------------------------------------------
@@ -533,5 +604,152 @@ async fn ephemeral_print(
     if !got_content {
         bail!("no content received from provider (possible rate limit or empty response)");
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// --print mode (resumed session)
+// ---------------------------------------------------------------------------
+
+async fn resume_print_once(
+    provider: Arc<dyn ModelProvider + Send + Sync>,
+    system: Option<String>,
+    prompt: &str,
+    model: String,
+    cwd: &Path,
+    home: &config::TauHome,
+    session_id: &str,
+) -> anyhow::Result<()> {
+    let mut session = resume_session(provider, system, model, cwd.to_path_buf(), home, session_id)
+        .await
+        .context("resuming session for --print")?;
+
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let mut got_content = false;
+
+    {
+        let stream = session.prompt(prompt)?;
+        futures::pin_mut!(stream);
+        while let Some(event) = stream.next().await {
+            match event {
+                AgentEvent::MessageUpdate(update) => {
+                    if let AssistantMessageEvent::TextDelta(delta) = &update.assistant_message_event
+                    {
+                        got_content = true;
+                        write!(out, "{}", delta.delta)?;
+                        out.flush()?;
+                    }
+                }
+                AgentEvent::ToolExecutionStart(start) => {
+                    eprintln!("[tool: {}]", start.tool_name);
+                }
+                AgentEvent::ToolExecutionUpdate(_) => {}
+                AgentEvent::ToolExecutionEnd(end) => {
+                    let preview = end.result.text();
+                    let preview = if preview.len() > 120 {
+                        format!("{}…", &preview[..120])
+                    } else {
+                        preview
+                    };
+                    let status = if end.is_error { " error" } else { "" };
+                    eprintln!("[tool: {}{} → {}]", end.tool_name, status, preview);
+                }
+                AgentEvent::AgentEnd(_) => {
+                    writeln!(out)?;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if !got_content {
+        bail!("no content received from provider (possible rate limit or empty response)");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// REPL (resumed session)
+// ---------------------------------------------------------------------------
+
+async fn run_repl_resumed(
+    provider: Arc<dyn ModelProvider + Send + Sync>,
+    system: Option<String>,
+    model: String,
+    cwd: &Path,
+    home: &config::TauHome,
+    verbose: bool,
+    session_id: &str,
+) -> anyhow::Result<()> {
+    let stdin = io::stdin();
+    let mut reader = stdin.lock().lines();
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+
+    let mut session = resume_session(provider, system, model, cwd.to_path_buf(), home, session_id)
+        .await
+        .context("resuming session for REPL")?;
+    if verbose {
+        writeln!(
+            out,
+            "session (resumed): {}",
+            session.storage().path().display()
+        )?;
+    }
+
+    loop {
+        write!(out, "You: ")?;
+        out.flush()?;
+
+        let line = match reader.next() {
+            Some(Ok(l)) => l,
+            Some(Err(e)) => bail!("read error: {e}"),
+            None => {
+                writeln!(out)?;
+                break;
+            }
+        };
+
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        write!(out, "Assistant: ")?;
+        out.flush()?;
+
+        let stream = session.prompt(line.as_str())?;
+        futures::pin_mut!(stream);
+        while let Some(event) = stream.next().await {
+            match event {
+                AgentEvent::MessageUpdate(update) => {
+                    if let AssistantMessageEvent::TextDelta(delta) = &update.assistant_message_event
+                    {
+                        write!(out, "{}", delta.delta)?;
+                        out.flush()?;
+                    }
+                }
+                AgentEvent::ToolExecutionStart(start) => {
+                    eprintln!("[tool: {}]", start.tool_name);
+                }
+                AgentEvent::ToolExecutionUpdate(_) => {}
+                AgentEvent::ToolExecutionEnd(end) => {
+                    let preview = end.result.text();
+                    let preview = if preview.len() > 120 {
+                        format!("{}…", &preview[..120])
+                    } else {
+                        preview
+                    };
+                    let status = if end.is_error { " error" } else { "" };
+                    eprintln!("[tool: {}{} → {}]", end.tool_name, status, preview);
+                }
+                AgentEvent::AgentEnd(_) => {
+                    writeln!(out)?;
+                }
+                _ => {}
+            }
+        }
+    }
+
     Ok(())
 }
