@@ -221,7 +221,7 @@ storage.append(&SessionEntry::Leaf(LeafEntry::default())).await?;
 
 - [x] `cargo build --workspace` 零警告
 - [x] `cargo test --workspace --features tau-agent/testing` 全绿（130 测试）
-- [x] `tau-coding` session 模块单元测试通过（6 storage + 5 manager = 11 测试）
+- [x] `tau-coding` session 模块单元测试通过（6 storage + 7 manager = 13 测试）
 - [x] `tau-coding` catalog 模块单元测试通过（8 测试）
 - [x] CLI print 模式自动创建 session 文件并持久化消息
 - [x] Session 文件格式与 Python 兼容（JSONL + v1 迁移）

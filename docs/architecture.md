@@ -4,7 +4,7 @@
 
 本文件是 huggingface/tau（Python）到 Rust 重写的总体架构设计与全套迁移计划。它基于对原项目三个包（`tau_ai` ≈4.1k 行、`tau_agent` ≈1.7k 行、`tau_coding` ≈25.7k 行）全部核心源码的通读产出。
 
-> **当前状态**: Phase 1-7 全部完成（含 5.1-5.8、6 REPL、7 ratatui TUI），共 **195 测试**全绿，clippy 与 `fmt` 通过（TUI 置于 `feature = "tui"`，默认不编译）。已用真实 OpenCode 免费模型端到端验证（LRU crate 10/10、resume 18/18、429 退避、wire 双向兼容 golden）。剩余为 Phase 8（OAuth / 更多 provider / skills / 扩展）。详见文末 §6 与 §4。
+> **当前状态**: Phase 1-7 全部完成（含 5.1-5.8、6 REPL、7 ratatui TUI）。测试全绿：默认 **193**、`--features tui` **198**（TUI 测试仅在 `tui` feature 下编译）；clippy 与 `fmt` 干净（TUI 置于 `feature = "tui"`，默认不编译）。已用真实 OpenCode 免费模型端到端验证（LRU crate 10/10、resume 18/18、429 退避、wire 双向兼容 golden）。剩余为 Phase 8（OAuth / 更多 provider / skills / 扩展）。详见文末 §6 与 §4。
 
 范围决策（已确认）：
 
@@ -427,7 +427,7 @@ reqwest 客户端（代理规整）、手写 SSE 行解析、retry/退避、`can
 
 ## Phase 4 — 配置与持久化（✅ 已完成 2026-07-19）
 `JsonlSessionStorage`（session 文件读写）、`SessionManager`（session 目录管理）、catalog 深度合并、CLI 集成 session 持久化。
-验证：storage 4 + manager 4 + catalog 3 = 11 新测试，workspace 全部 130 测试全绿；session 文件格式与 Python 兼容；内置 catalog 通过 `include_str!` 嵌入，合并逻辑对齐 Python catalog loader。详见 `docs/phase-4.md`。
+ 验证：storage 6 + manager 7 + catalog 8 = 21 测试（见 §6.4 与 `docs/phase-4.md`）；session 文件格式与 Python 兼容；内置 catalog 通过 `include_str!` 嵌入，合并逻辑对齐 Python catalog loader。详见 `docs/phase-4.md`。
 
 ## Phase 5 — CodingSession + print 模式端到端 ★ 第一个用户可见里程碑（✅ 已完成 2026-07-19, 5.1–5.8）
 - 5.1 `CodingSession` 组合根接入 CLI，parent_id 链持久化（issue #3/#10 关闭）
@@ -460,9 +460,9 @@ tau-cli/src/repl/
 ```
 `CodingSession` 已提供 `prompt() -> Stream`（5.1）、`cancel()`（5.2 中断修复）、`set_model`/`set_provider`（5.4），REPL 只做 I/O 编排，不触碰协议。
 
-### 6.3 架构改动点（需先决）
-- `StreamRequest`（`tau-agent`）增加 `thinking_level: Option<&str>`，由 provider 适配层翻译为 catalog 的 `thinking_parameter`（如 `reasoning_effort`）——原版 `ThinkingLevel` 枚举 + `_sync_thinking_level_to_active_model` 逻辑需复刻到 `tau-coding::thinking`（原版 `thinking.py` 约 200 行）。
-- 当前 `CodingSession::set_model`/`set_provider` 仅改内存（issue #16 推迟）；REPL 的 `/model` `/provider` 切换应按原版 `_persist_default_model_choice` 落盘 `providers.json` 偏好 + 追加 `ModelChangeEntry`/`ThinkingLevelChangeEntry`。
+### 6.3 架构改动点（已在 Phase 6 落地）
+- `StreamRequest`（`tau-agent`）已含 `thinking_level: Option<&str>`，由 provider 适配层翻译为 catalog 的 `thinking_parameter`（如 OpenAI 兼容 → `reasoning_effort`，Anthropic → adaptive effort）。`/thinking [level]` 命令经 `CodingSession::set_thinking_level` 写入，并在 `prompt()` 时透传。原版 `ThinkingLevel` 枚举 + `_sync_thinking_level_to_active_model` 的等效逻辑在 `tau-coding::commands` + `CodingSession` 中以简化形式落地（见 Phase 6 节与 §8.1 的已知差距）。
+- 当前 `CodingSession::set_model`/`set_provider` 仅改内存（issue #16 推迟）；REPL 的 `/model` `/provider` 切换应按原版 `_persist_default_model_choice` 落盘 `providers.json` 偏好 + 追加 `ModelChangeEntry`/`ThinkingLevelChangeEntry`——此项仍为 Phase 8 候选。
 
 ## Phase 7 — ratatui TUI（已落地，feature = "tui"）
 原版 TUI 是 **6070 行** `tui/app.py` + `adapter.py`（纯 `apply(event)`）+ `state.py` + `widgets.py` + `autocomplete.py`。Rust 端按"纯 adapter 先行"策略落地最小可用子集：
@@ -586,18 +586,22 @@ Rust 等同约束：**ratatui 只依赖 `tau-types` 事件 + `CodingSession` 只
 
 ## 6.4 测试覆盖
 
-| Crate | 单元测试 | 集成测试 | 总计 |
+> 下表为分类快照；**权威测试总数以 `cargo test --workspace` 实时结果为准**（默认 193 / `--features tui` 198）。随 Phase 迭代各 crate 计数会增长。
+
+| Crate | 单元测试 | 集成测试 | 总计（快照） |
 |-------|---------|---------|------|
 | `tau-types` | 4 | — | 4 |
 | `tau-agent` | 10 | 11 | 21 |
-| `tau-ai` | 22 | 10 | 32 |
-| `tau-cli` | 8 | 10 | 18 |
-| `tau-coding` | 99 | 10 | 109 |
-| **总计** | **143** | **45** | **184** |
+| `tau-ai` | 26 | 10 | 36 |
+| `tau-cli` | 11 | 10 | 21 |
+| `tau-coding` | 100 | 10 | 110 |
+| **总计（快照）** | **151** | **41** | **192** |
+
+> 注：快照总计 192 ≈ 实时 193 的差异来自 bin 集成测试归类的统计方式；以 `cargo test --workspace` 输出为准。Phase 4 的 storage/manager/catalog 单测实际为 6/7/8。
 
 ### 待实现测试（Phase 4 → 已完成）
 
-Phase 4 测试已全部落地（storage 4 + manager 6 + catalog 3 = 13 测试，已含于 `tau-coding` 72 单元测试中）。
+Phase 4 测试已全部落地（storage 6 + manager 7 + catalog 8 = 21 测试，已含于 `tau-coding` 单元测试中；各 crate 精确计数随迭代增长，权威总数见 §6.4 与文件头）。
 
 ## 6.5 已支持的 Provider
 

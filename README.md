@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-190%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-193%20passing-brightgreen)](#testing)
 
 ---
 
@@ -409,16 +409,18 @@ cargo fmt --check
 
 ### Testing Strategy
 
-The test suite includes **184 tests** across unit, integration, and wiremock levels:
+The test suite includes **193 tests** (default) / **198** with `--features tui` across unit, integration, and wiremock levels:
 
 | Crate | Unit Tests | Integration Tests | Total |
 |---|---|---|---|
 | `tau-types` | 4 | — | 4 |
 | `tau-agent` | 10 | 11 (loop + harness) | 21 |
-| `tau-ai` | 23 (incl. retry/backoff + reasoning_effort unit tests) | 10 (wiremock HTTP mocks) | 33 |
-| `tau-coding` | 99 (tools + session + catalog + context_window + compaction + compaction_prompts + naming + commands + shell_escape + prompt + repair + render) | 10 (coding session e2e + compat) | 109 |
-| `tau-cli` | 11 (render module + subprocess CLI tests + REPL completion) | 9 (subprocess CLI tests) | 20 |
-| **Total** | **143** | **47** | **190** |
+| `tau-ai` | 26 (incl. retry/backoff + reasoning_effort + SSE proptest) | 10 (wiremock HTTP mocks) | 36 |
+| `tau-coding` | 100 (tools + session + catalog + context_window + compaction + compaction_prompts + naming + commands + shell_escape + prompt + repair + render) | 10 (coding session e2e + compat) | 110 |
+| `tau-cli` | 11 (render module + subprocess CLI tests + REPL completion + TUI) | 9 (subprocess CLI tests) | 20 |
+| **Total** | **151** | **41** | **192** |
+
+> 测试总数以 `cargo test --workspace` 实时结果为准（默认 **193** / `--features tui` **198**）；上表为分类快照。
 
 **Integration test patterns**:
 - `tau-ai` tests use [wiremock](https://github.com/LukeMathWalker/wiremock-rs) to mock HTTP responses and verify SSE parsing + retry behavior
