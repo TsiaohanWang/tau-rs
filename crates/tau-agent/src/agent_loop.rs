@@ -31,6 +31,7 @@ pub struct LoopArgs<'a> {
     pub prompts: &'a [AgentMessage],
     pub max_turns: Option<u32>,
     pub signal: Option<CancellationToken>,
+    pub thinking_level: Option<&'a str>,
     pub get_steering_messages: Option<&'a mut (dyn FnMut() -> Vec<AgentMessage> + Send)>,
     pub get_follow_up_messages: Option<&'a mut (dyn FnMut() -> Vec<AgentMessage> + Send)>,
     pub before_tool_call: Option<&'a dyn BeforeToolCall>,
@@ -106,6 +107,7 @@ pub fn run_agent_loop(mut args: LoopArgs<'_>) -> impl futures::Stream<Item = Age
                         messages: &*args.messages,
                         tools: args.tools,
                         signal: args.signal.clone(),
+                        thinking_level: args.thinking_level,
                     };
                     let mut source = args.provider.stream_response(&request);
                     let mut started = false;

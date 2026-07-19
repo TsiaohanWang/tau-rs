@@ -74,16 +74,18 @@ impl OpenAIProvider {
         system: &str,
         messages: &[AgentMessage],
         tools: &[AgentTool],
+        thinking_level: Option<&str>,
     ) -> impl futures::Stream<Item = ProviderEvent> + Send + 'static {
         let config = self.config.clone();
         let client = self.client.clone();
         let system = system.to_string();
         let messages = messages.to_vec();
         let tools = tools.to_vec();
+        let thinking_level = thinking_level.map(|s| s.to_string());
 
         stream! {
             let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
-            let payload = build_payload(&config, &system, &messages, &tools);
+            let payload = build_payload(&config, &system, &messages, &tools, thinking_level.as_deref());
 
             let mut headers = reqwest::header::HeaderMap::new();
             headers.insert("content-type", "application/json".parse().unwrap());
@@ -496,6 +498,7 @@ fn build_payload(
     system: &str,
     messages: &[AgentMessage],
     tools: &[AgentTool],
+    thinking_level: Option<&str>,
 ) -> Value {
     let mut oai_messages: Vec<Value> = Vec::new();
 
@@ -584,6 +587,15 @@ fn build_payload(
         payload["tools"] = json!(tools.iter().map(openai_tool).collect::<Vec<_>>());
     }
 
+    // Thinking/reasoning-effort: OpenAI-compatible providers accept
+    // `reasoning_effort`. An empty/`off` level means "use provider default",
+    // so we omit the field (mirrors the original `ThinkingLevel.OFF` meaning).
+    if let Some(level) = thinking_level {
+        if !level.is_empty() && level != "off" {
+            payload["reasoning_effort"] = json!(level);
+        }
+    }
+
     payload
 }
 
@@ -654,6 +666,27 @@ mod tests {
         let tc = b.build(0);
         assert_eq!(tc.arguments["file_path"], "/tmp/x");
     }
+
+    #[test]
+    fn build_payload_includes_reasoning_effort_for_thinking_level() {
+        let config = OpenAIConfig::default();
+        let messages = vec![tau_types::AgentMessage::User(tau_types::UserMessage::new(
+            "Hi",
+        ))];
+        let tools: Vec<tau_agent::tool::AgentTool> = vec![];
+
+        let with_level = build_payload(&config, "sys", &messages, &tools, Some("high"));
+        assert_eq!(
+            with_level.get("reasoning_effort").and_then(|v| v.as_str()),
+            Some("high")
+        );
+
+        // `off` and `None` must not emit the parameter (provider default).
+        let off = build_payload(&config, "sys", &messages, &tools, Some("off"));
+        assert!(off.get("reasoning_effort").is_none());
+        let none = build_payload(&config, "sys", &messages, &tools, None);
+        assert!(none.get("reasoning_effort").is_none());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -682,9 +715,12 @@ impl ModelProvider for OpenAIModelProvider {
         &'a self,
         request: &'a StreamRequest<'a>,
     ) -> BoxStream<'a, AssistantMessageEvent> {
-        let provider_stream =
-            self.inner
-                .stream_response(request.system, request.messages, request.tools);
+        let provider_stream = self.inner.stream_response(
+            request.system,
+            request.messages,
+            request.tools,
+            request.thinking_level,
+        );
 
         Box::pin(canonicalize_provider_stream(provider_stream))
     }

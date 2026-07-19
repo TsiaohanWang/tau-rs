@@ -63,6 +63,7 @@ pub struct AgentHarnessConfig {
     pub tools: Vec<AgentTool>,
     pub max_turns: Option<u32>,
     pub queue_mode: QueueMode,
+    pub thinking_level: Option<String>,
     pub before_tool_call: Option<Arc<dyn BeforeToolCall>>,
     pub after_tool_call: Option<Arc<dyn AfterToolCall>>,
 }
@@ -82,6 +83,7 @@ impl AgentHarnessConfig {
             tools: Vec::new(),
             max_turns: None,
             queue_mode: QueueMode::OneAtATime,
+            thinking_level: None,
             before_tool_call: None,
             after_tool_call: None,
         }
@@ -160,6 +162,7 @@ pub(crate) struct HarnessConfigShared {
     tools: Arc<[AgentTool]>,
     max_turns: Option<u32>,
     queue_mode: QueueMode,
+    thinking_level: Option<String>,
     before_tool_call: Option<Arc<dyn BeforeToolCall>>,
     after_tool_call: Option<Arc<dyn AfterToolCall>>,
 }
@@ -177,6 +180,7 @@ impl AgentHarness {
             tools: Arc::from(config.tools),
             max_turns: config.max_turns,
             queue_mode: config.queue_mode,
+            thinking_level: config.thinking_level,
             before_tool_call: config.before_tool_call,
             after_tool_call: config.after_tool_call,
         };
@@ -300,6 +304,17 @@ impl AgentHarness {
     /// Switch the active model (in-memory). Applies to the next run.
     pub fn set_model(&mut self, model: String) {
         self.config_shared.model = model;
+    }
+
+    /// Set the thinking/reasoning-effort level (in-memory). `None` clears it,
+    /// reverting to the provider default. Applies to the next run.
+    pub fn set_thinking_level(&mut self, level: Option<String>) {
+        self.config_shared.thinking_level = level;
+    }
+
+    /// The current thinking level, if set.
+    pub fn thinking_level(&self) -> Option<&str> {
+        self.config_shared.thinking_level.as_deref()
     }
 
     /// Switch the active provider (in-memory). Applies to the next run.
@@ -436,6 +451,7 @@ impl AgentHarness {
                 prompts: &prompts,
                 max_turns: config.max_turns,
                 signal: Some(token.clone()),
+                thinking_level: config.thinking_level.as_deref(),
                 get_steering_messages: Some(&mut steering_drain),
                 get_follow_up_messages: Some(&mut follow_up_drain),
                 before_tool_call: config.before_tool_call.as_deref(),

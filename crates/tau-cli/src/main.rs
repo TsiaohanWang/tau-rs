@@ -1,7 +1,7 @@
 mod config;
 mod render;
+mod repl;
 
-use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -12,10 +12,7 @@ use tau_agent::harness::{AgentHarness, AgentHarnessConfig, QueueMode};
 use tau_agent::provider::ModelProvider;
 use tau_ai::anthropic::{AnthropicConfig, AnthropicModelProvider, AnthropicProvider};
 use tau_ai::openai::{OpenAIConfig, OpenAIModelProvider, OpenAIProvider};
-use tau_coding::commands::{self, CommandOutcome};
 use tau_coding::config::{CatalogConfig, ProviderKind, load_user_or_default};
-use tau_coding::session::CodingSession;
-use tau_coding::shell_escape::{self, ShellLine};
 use tau_types::{AgentEvent, AssistantMessageEvent};
 
 #[derive(Parser)]
@@ -241,31 +238,24 @@ async fn main() -> anyhow::Result<()> {
                 if prompt_text.is_some() {
                     bail!("interactive mode does not accept a prompt; use --print with a prompt");
                 }
-                eprintln!("tau-rs ({provider_name}) | type your message (Ctrl-D to exit)");
-                if let Some(ref session_id) = resume_id {
-                    run_repl_resumed(
+                let history_path = home.root.join("history");
+                let session = match resume_id {
+                    Some(ref id) => {
+                        resume_session(model_provider, system, model, cwd.to_path_buf(), &home, id)
+                            .await
+                            .context("resuming session for REPL")?
+                    }
+                    None => open_or_create_session(
                         model_provider,
                         system,
                         model,
-                        &cwd,
+                        cwd.to_path_buf(),
                         &home,
-                        cli.verbose,
-                        session_id,
-                        &cli.format,
                     )
-                    .await?;
-                } else {
-                    run_repl(
-                        model_provider,
-                        system,
-                        model,
-                        &cwd,
-                        &home,
-                        cli.verbose,
-                        &cli.format,
-                    )
-                    .await?;
-                }
+                    .await
+                    .context("opening session")?,
+                };
+                repl::run(session, &cwd, &history_path, cli.verbose, &cli.format).await?;
             }
         }
     }
@@ -411,6 +401,7 @@ async fn open_or_create_session(
         compaction_reserve: tau_coding::session::DEFAULT_RESERVE,
         max_turns: Some(20),
         provider_name: None,
+        thinking_level: None,
     };
     let mut session = tau_coding::session::CodingSession::new(storage, cfg);
     session.write_session_info().await?;
@@ -440,162 +431,11 @@ async fn resume_session(
         compaction_reserve: tau_coding::session::DEFAULT_RESERVE,
         max_turns: Some(20),
         provider_name: None,
+        thinking_level: None,
     };
     tau_coding::session::CodingSession::load(storage, cfg)
         .await
         .context("loading resumed session")
-}
-
-// ---------------------------------------------------------------------------
-// REPL
-// ---------------------------------------------------------------------------
-
-#[allow(clippy::too_many_arguments)]
-async fn run_repl(
-    provider: Arc<dyn ModelProvider + Send + Sync>,
-    system: Option<String>,
-    model: String,
-    cwd: &Path,
-    home: &config::TauHome,
-    verbose: bool,
-    format: &str,
-) -> anyhow::Result<()> {
-    let stdin = io::stdin();
-    let mut reader = stdin.lock().lines();
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-
-    let mut session = open_or_create_session(provider, system, model, cwd.to_path_buf(), home)
-        .await
-        .context("opening session")?;
-    if verbose {
-        writeln!(out, "session: {}", session.storage().path().display())?;
-    }
-
-    let mut prev_shell: Option<String> = None;
-    let plain = format == "plain";
-
-    loop {
-        if plain {
-            write!(out, "You: ")?;
-            out.flush()?;
-        }
-
-        let line = match reader.next() {
-            Some(Ok(l)) => l,
-            Some(Err(e)) => bail!("read error: {e}"),
-            None => {
-                if plain {
-                    writeln!(out)?;
-                }
-                break;
-            }
-        };
-
-        let result = handle_repl_line(&mut session, &line, &mut out, cwd, &mut prev_shell).await?;
-        let prompt_text = match result {
-            ReplLineResult::Quit => break,
-            ReplLineResult::Handled => continue,
-            ReplLineResult::RunPrompt(text) => text,
-        };
-
-        if plain {
-            write!(out, "Assistant: ")?;
-            out.flush()?;
-        }
-
-        // `session.prompt` returns a wrapped stream that auto-persists both
-        // the user message (pre-run) and each assistant `MessageEnd` event
-        // (side effect). The old `persist_message` calls are gone — see
-        // architecture-issues.md #3 closure (ADR-P5-2). Snapshot the tools
-        // up front: the stream holds `&mut session`, so we cannot borrow
-        // `session.tools()` immutably while it is alive.
-        let tools = session.tools().to_vec();
-        let mut renderer = render::build_renderer(format);
-        let stream = session.prompt(prompt_text.as_str())?;
-        futures::pin_mut!(stream);
-        while let Some(event) = stream.next().await {
-            renderer.on_event(&event, &tools);
-        }
-        renderer.flush();
-    }
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Shared REPL line handler
-// ---------------------------------------------------------------------------
-
-/// Outcome of handling a single REPL input line.
-enum ReplLineResult {
-    /// Print the session and quit.
-    Quit,
-    /// The line was a command or shell escape; nothing else to do.
-    Handled,
-    /// Run this text as a normal prompt through `session.prompt`.
-    RunPrompt(String),
-}
-
-/// Process one REPL line: shell escape (`!`/`!!`) → slash command (`/…`) →
-/// plain prompt. Keeps `prev_shell` updated with the last `! <cmd>` so `!!`
-/// can replay it. The caller is responsible for actually driving the prompt
-/// stream when [`ReplLineResult::RunPrompt`] is returned.
-async fn handle_repl_line(
-    session: &mut CodingSession,
-    line: &str,
-    out: &mut impl std::io::Write,
-    cwd: &Path,
-    prev_shell: &mut Option<String>,
-) -> anyhow::Result<ReplLineResult> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return Ok(ReplLineResult::Handled);
-    }
-
-    // 1. Shell escape: `! cmd` or `!!`.
-    if let Some(shell) = shell_escape::parse_shell(line) {
-        match &shell {
-            ShellLine::Once(cmd) if cmd.trim().is_empty() => {
-                writeln!(out, "(empty shell command)")?;
-            }
-            ShellLine::Once(cmd) => {
-                *prev_shell = Some(cmd.clone());
-                let output = shell_escape::run(&shell, cwd, prev_shell.as_deref()).await;
-                writeln!(out, "{output}")?;
-            }
-            ShellLine::Repeat => {
-                let output = shell_escape::run(&shell, cwd, prev_shell.as_deref()).await;
-                writeln!(out, "{output}")?;
-            }
-        }
-        return Ok(ReplLineResult::Handled);
-    }
-
-    // 2. Slash command.
-    if let Some(parsed) = commands::parse(line) {
-        match parsed {
-            Ok(cmd) => {
-                let outcome = commands::dispatch(session, cmd, cwd).await?;
-                match outcome {
-                    CommandOutcome::Quit => return Ok(ReplLineResult::Quit),
-                    CommandOutcome::ClearMessages => {
-                        writeln!(out, "(cleared in-memory messages)")?;
-                    }
-                    CommandOutcome::Handled(msg) => {
-                        writeln!(out, "{msg}")?;
-                    }
-                }
-            }
-            Err(msg) => {
-                writeln!(out, "error: {msg}")?;
-            }
-        }
-        return Ok(ReplLineResult::Handled);
-    }
-
-    // 3. Plain prompt.
-    Ok(ReplLineResult::RunPrompt(line.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -672,6 +512,7 @@ async fn ephemeral_print(
         tools: tools.clone(),
         max_turns: Some(20),
         queue_mode: QueueMode::OneAtATime,
+        thinking_level: None,
         before_tool_call: None,
         after_tool_call: None,
     });
@@ -735,81 +576,5 @@ async fn resume_print_once(
     if !got_content {
         bail!("no content received from provider (possible rate limit or empty response)");
     }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// REPL (resumed session)
-// ---------------------------------------------------------------------------
-
-#[allow(clippy::too_many_arguments)]
-async fn run_repl_resumed(
-    provider: Arc<dyn ModelProvider + Send + Sync>,
-    system: Option<String>,
-    model: String,
-    cwd: &Path,
-    home: &config::TauHome,
-    verbose: bool,
-    session_id: &str,
-    format: &str,
-) -> anyhow::Result<()> {
-    let stdin = io::stdin();
-    let mut reader = stdin.lock().lines();
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-
-    let mut session = resume_session(provider, system, model, cwd.to_path_buf(), home, session_id)
-        .await
-        .context("resuming session for REPL")?;
-    if verbose {
-        writeln!(
-            out,
-            "session (resumed): {}",
-            session.storage().path().display()
-        )?;
-    }
-
-    let mut prev_shell: Option<String> = None;
-    let plain = format == "plain";
-
-    loop {
-        if plain {
-            write!(out, "You: ")?;
-            out.flush()?;
-        }
-
-        let line = match reader.next() {
-            Some(Ok(l)) => l,
-            Some(Err(e)) => bail!("read error: {e}"),
-            None => {
-                if plain {
-                    writeln!(out)?;
-                }
-                break;
-            }
-        };
-
-        let result = handle_repl_line(&mut session, &line, &mut out, cwd, &mut prev_shell).await?;
-        let prompt_text = match result {
-            ReplLineResult::Quit => break,
-            ReplLineResult::Handled => continue,
-            ReplLineResult::RunPrompt(text) => text,
-        };
-
-        if plain {
-            write!(out, "Assistant: ")?;
-            out.flush()?;
-        }
-
-        let tools = session.tools().to_vec();
-        let mut renderer = render::build_renderer(format);
-        let stream = session.prompt(prompt_text.as_str())?;
-        futures::pin_mut!(stream);
-        while let Some(event) = stream.next().await {
-            renderer.on_event(&event, &tools);
-        }
-        renderer.flush();
-    }
-
     Ok(())
 }

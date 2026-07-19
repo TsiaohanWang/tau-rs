@@ -441,8 +441,8 @@ reqwest 客户端（代理规整）、手写 SSE 行解析、retry/退避、`can
 
 验证：`tau-rs -p "..."` 跑通并落盘 session；同一 session 文件可被 Python `tau` resume（双向兼容终极验证，5.6 已锁）；真实免费模型多轮工具循环 18/18 测试通过。
 
-## Phase 6 — 简洁交互 REPL（待实现）
-将 `tau-cli/src/main.rs` 当前基于 `stdin().lock().lines()` 的朴素 REPL 升级为 **rustyline** 驱动，对齐原版 `cli.py` 的交互语义。
+## Phase 6 — 简洁交互 REPL（✅ 已完成 2026-07-19）
+将 `tau-cli/src/main.rs` 原朴素 `stdin().lock().lines()` REPL 升级为 **rustyline** 驱动（见 `repl.rs`）：持久化历史（`~/.tau/history`）、Tab 补全（斜杠命令 / 工具名 / 本地文件路径）、`/thinking` 切换、`Ctrl-C` 清上下文、`Ctrl-D` 退出。thinking level 经 `StreamRequest.thinking_level` 透传，由 provider 翻译为 `reasoning_effort`（OpenAI 兼容）或 Anthropic adaptive effort——架构改动点已在 6.3 落地。
 
 ### 6.1 目标能力（来自原版 `CodingSession.prompt` / `run_terminal_command`）
 - 流式输出 + `Esc` 取消（`CancellationToken` 已就绪，harness 支持 `cancel()`）
@@ -575,7 +575,7 @@ Rust 等同约束：**ratatui 只依赖 `tau-types` 事件 + `CodingSession` 只
 | 5 | `tau-coding` | `session/repair.rs` | 中断 tool_call 修复（in-memory，5.2） | ✅ 已完成 |
 | 5 | `tau-cli` | `render/mod.rs` | 三渲染器 plain/json/transcript + `EventRenderer` trait（5.5） | ✅ 已完成 |
 | 5 | `tau-cli` | `main.rs` | print/REPL/resume 全模式 + `--format` + 429 退避（5.1-5.8） | ✅ 已完成 |
-| 6 | `tau-cli` | `repl/` | rustyline、历史记录、自动补全、thinking 切换 | ⏳ 待实现（见 §4 Phase 6） |
+| 6 | `tau-cli` | `repl/` | rustyline REPL、持久化历史、命令/工具/路径补全、`/thinking` 切换 | ✅ 已完成 |
 | 7 | `tau-cli` | `tui/` | ratatui 全量终端 UI（纯 adapter 先行） | ⏳ 待实现（见 §4 Phase 7） |
 
 ## 6.4 测试覆盖
@@ -609,8 +609,8 @@ Phase 4 测试已全部落地（storage 4 + manager 6 + catalog 3 = 13 测试，
 
 | Phase | 模块 | 原版对应 | 状态 |
 |-------|------|----------|------|
-| 6 | `tau-cli/src/repl/` | `cli.py::run_print_mode` / `run_openai_print_mode` 交互分支 | ⏳ 待实现 |
-| 6 | thinking level 切换 | `session.py::set_thinking_level` / `thinking.py` | ⏳ 待实现（需 `StreamRequest` 加 thinking 字段） |
+| 6 | `tau-cli/src/repl/` | `cli.py::run_print_mode` / `run_openai_print_mode` 交互分支 | ✅ 已完成 |
+| 6 | thinking level 切换 | `session.py::set_thinking_level` / `thinking.py` | ✅ 已完成（`StreamRequest.thinking_level` → `reasoning_effort` / Anthropic adaptive） |
 | 7 | `tau-cli/src/tui/` | `tui/app.py` (6070) + `adapter.py`(纯) + `state.py` | ⏳ 待实现（纯 adapter 先行） |
 | 8 | `credentials::oauth` | `oauth*.py`（device/PKCE） | ⏳ 待实现 |
 | 8 | `OpenAICodexProvider` | `tau_ai/openai_codex.py` | ⏳ 待实现 |

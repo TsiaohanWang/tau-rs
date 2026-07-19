@@ -79,8 +79,20 @@ impl AnthropicProvider {
         system: &str,
         messages: &[AgentMessage],
         tools: &[AgentTool],
+        thinking_level: Option<&str>,
     ) -> impl futures::Stream<Item = ProviderEvent> + Send + 'static {
-        let config = self.config.clone();
+        let mut config = self.config.clone();
+        // Apply the per-request thinking level (if any) by mapping it onto
+        // Anthropic's adaptive effort knob. An empty/`off` level clears effort.
+        match thinking_level {
+            Some(level) if !level.is_empty() && level != "off" => {
+                config.thinking_mode = Some("adaptive".to_string());
+                config.thinking_effort = Some(level.to_string());
+            }
+            _ => {
+                config.thinking_effort = None;
+            }
+        }
         let client = self.client.clone();
         let system = system.to_string();
         let messages = messages.to_vec();
@@ -546,9 +558,12 @@ impl ModelProvider for AnthropicModelProvider {
         &'a self,
         request: &'a StreamRequest<'a>,
     ) -> BoxStream<'a, AssistantMessageEvent> {
-        let provider_stream =
-            self.inner
-                .stream_response(request.system, request.messages, request.tools);
+        let provider_stream = self.inner.stream_response(
+            request.system,
+            request.messages,
+            request.tools,
+            request.thinking_level,
+        );
 
         Box::pin(canonicalize_provider_stream(provider_stream))
     }

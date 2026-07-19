@@ -252,3 +252,18 @@ async fn test_harness_queue_mode_all_drains_messages_together() {
         ]
     );
 }
+
+#[test]
+fn thinking_level_is_set_and_read_back() {
+    let provider = FakeProvider::new(vec![vec![]]); // FakeProvider ignores thinking but harness stores it
+    let mut harness = AgentHarness::new(AgentHarnessConfig::new(
+        Arc::new(provider),
+        "fake",
+        "You are Tau.",
+    ));
+    assert_eq!(harness.thinking_level(), None);
+    harness.set_thinking_level(Some("high".to_string()));
+    assert_eq!(harness.thinking_level(), Some("high"));
+    harness.set_thinking_level(None);
+    assert_eq!(harness.thinking_level(), None);
+}

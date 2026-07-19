@@ -171,7 +171,7 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert(RETRY_AFTER, HeaderValue::from_static("30"));
         assert_eq!(retry_after_seconds(&h), Some(30.0));
-        let mut empty = HeaderMap::new();
+        let empty = HeaderMap::new();
         assert_eq!(retry_after_seconds(&empty), None);
         let mut bad = HeaderMap::new();
         bad.insert(

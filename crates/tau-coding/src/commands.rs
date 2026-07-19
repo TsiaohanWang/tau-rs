@@ -22,6 +22,9 @@ pub enum Command {
     Model(String),
     /// `/provider <name>` — switch the active provider in memory.
     Provider(String),
+    /// `/thinking [level]` — show or set the thinking/reasoning-effort level.
+    /// With no argument, prints the current level. `off` (or empty) clears it.
+    Thinking(Option<String>),
     /// `/exit` — quit the REPL.
     Exit,
     /// `/resume [id|latest]` — resume another session.
@@ -60,6 +63,7 @@ pub fn parse(line: &str) -> Option<Result<Command, String>> {
             Some(provider) if !provider.is_empty() => Command::Provider(provider),
             _ => return Some(Err("usage: /provider <name>".to_string())),
         },
+        "thinking" => Command::Thinking(arg.filter(|a| !a.is_empty())),
         "resume" => Command::Resume(arg.filter(|a| !a.is_empty())),
         other => return Some(Err(format!("unknown command: /{other}"))),
     };
@@ -108,6 +112,28 @@ pub async fn dispatch(
                 "provider set to {provider} (in-memory)"
             )))
         }
+        Command::Thinking(level) => match level {
+            None => Ok(CommandOutcome::Handled(format!(
+                "thinking level: {}",
+                session
+                    .thinking_level()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "default (off)".to_string())
+            ))),
+            Some(lvl) => {
+                if lvl == "off" {
+                    session.set_thinking_level(None);
+                    Ok(CommandOutcome::Handled(
+                        "thinking level cleared (provider default)".to_string(),
+                    ))
+                } else {
+                    session.set_thinking_level(Some(lvl.clone()));
+                    Ok(CommandOutcome::Handled(format!(
+                        "thinking level set to {lvl} (in-memory)"
+                    )))
+                }
+            }
+        },
         Command::Resume(id) => {
             let _ = (id, cwd);
             Ok(CommandOutcome::Handled(
@@ -126,6 +152,7 @@ pub fn help_text() -> String {
         "  /clear             drop in-memory messages (keeps the journal)",
         "  /model <name>      switch model (in-memory)",
         "  /provider <name>   switch provider (in-memory)",
+        "  /thinking [level]  show or set reasoning-effort (off = default)",
         "  /resume [id]       resume a session (use --resume at startup)",
         "  /exit              quit",
         "",
@@ -172,6 +199,19 @@ mod tests {
     fn parse_model_without_arg_is_unknown() {
         // `/model` alone has no argument → treated as unknown command.
         assert!(matches!(parse("/model"), Some(Err(_))));
+    }
+
+    #[test]
+    fn parse_thinking_with_and_without_arg() {
+        assert_eq!(parse("/thinking"), Some(Ok(Command::Thinking(None))));
+        assert_eq!(
+            parse("/thinking high"),
+            Some(Ok(Command::Thinking(Some("high".to_string()))))
+        );
+        assert_eq!(
+            parse("/thinking off"),
+            Some(Ok(Command::Thinking(Some("off".to_string()))))
+        );
     }
 
     #[test]

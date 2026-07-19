@@ -28,6 +28,9 @@ pub struct CodingSessionConfig {
     /// Requested provider name (in-memory only; set via `/provider`). Not used
     /// to rebuild credentials in Phase 5.
     pub provider_name: Option<String>,
+    /// Active thinking/reasoning-effort level. `None` uses the provider
+    /// default. Set via `/thinking` / `set_thinking_level`.
+    pub thinking_level: Option<String>,
 }
 
 /// The composition root for a coding session.
@@ -75,6 +78,7 @@ impl CodingSession {
             tools: tools.to_vec(),
             max_turns: config.max_turns,
             queue_mode: QueueMode::OneAtATime,
+            thinking_level: config.thinking_level.clone(),
             before_tool_call: None,
             after_tool_call: None,
         });
@@ -137,6 +141,7 @@ impl CodingSession {
                 tools: tools.to_vec(),
                 max_turns: config.max_turns,
                 queue_mode: QueueMode::OneAtATime,
+                thinking_level: config.thinking_level.clone(),
                 before_tool_call: None,
                 after_tool_call: None,
             },
@@ -206,6 +211,18 @@ impl CodingSession {
     /// phase that wires credential resolution into the session).
     pub fn set_provider(&mut self, provider: String) {
         self.config.provider_name = Some(provider);
+    }
+
+    /// Set the thinking/reasoning-effort level (in-memory). `None` reverts to
+    /// the provider default. Applies to the next `prompt` via the harness.
+    pub fn set_thinking_level(&mut self, level: Option<String>) {
+        self.config.thinking_level = level.clone();
+        self.harness.set_thinking_level(level);
+    }
+
+    /// The current thinking level, if set.
+    pub fn thinking_level(&self) -> Option<&str> {
+        self.config.thinking_level.as_deref()
     }
 
     /// Drop all in-memory messages. The persisted journal is left untouched;
@@ -430,6 +447,7 @@ impl CodingSession {
             messages: &[user_message],
             tools: &[],
             signal: None,
+            thinking_level: None,
         };
 
         let mut stream = self.config.provider.stream_response(&request);
@@ -549,6 +567,7 @@ mod tests {
                 context_window: None,
                 compaction_reserve: 16384,
                 provider_name: None,
+                thinking_level: None,
             },
         )
     }
@@ -614,6 +633,7 @@ mod tests {
                 context_window,
                 compaction_reserve: 16384,
                 provider_name: None,
+                thinking_level: None,
             },
         )
     }

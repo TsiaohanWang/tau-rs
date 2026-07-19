@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-184%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-190%20passing-brightgreen)](#testing)
 
 ---
 
@@ -414,10 +414,10 @@ The test suite includes **184 tests** across unit, integration, and wiremock lev
 |---|---|---|---|
 | `tau-types` | 4 | — | 4 |
 | `tau-agent` | 10 | 11 (loop + harness) | 21 |
-| `tau-ai` | 22 (incl. retry/backoff unit tests) | 10 (wiremock HTTP mocks) | 32 |
+| `tau-ai` | 23 (incl. retry/backoff + reasoning_effort unit tests) | 10 (wiremock HTTP mocks) | 33 |
 | `tau-coding` | 99 (tools + session + catalog + context_window + compaction + compaction_prompts + naming + commands + shell_escape + prompt + repair + render) | 10 (coding session e2e + compat) | 109 |
-| `tau-cli` | 8 (render module + subprocess CLI tests) | 10 (subprocess CLI tests) | 18 |
-| **Total** | **143** | **45** | **184** |
+| `tau-cli` | 11 (render module + subprocess CLI tests + REPL completion) | 9 (subprocess CLI tests) | 20 |
+| **Total** | **143** | **47** | **190** |
 
 **Integration test patterns**:
 - `tau-ai` tests use [wiremock](https://github.com/LukeMathWalker/wiremock-rs) to mock HTTP responses and verify SSE parsing + retry behavior
@@ -481,7 +481,7 @@ The OpenCode free models rotate (`deepseek-v4-flash-free`, `mimo-v2.5-free`, `ne
 | Phase 3 | ✅ Done | Built-in tools (read/write/edit/bash) + `tau-cli` harness integration (print mode, REPL, config) |
 | Phase 4 | ✅ Done | Session persistence (`JsonlSessionStorage` + `SessionManager`) and catalog merge (`merge_catalogs` + embedded built-in catalog) integrated into CLI |
 | Phase 5 | ✅ Done | `CodingSession` 组合根、load/resume、compaction（三触发+LLM 摘要）、自动命名/斜杠命令/`!` shell escape、三渲染器（plain/json/transcript）、双向兼容 golden 验证、真实 API 端到端验证（5.1–5.7）、429 限流专用退避（5.8） |
-| Phase 6 | 🔲 Planned | 高级 REPL（rustyline 历史/补全、thinking 切换、steer/follow-up 语义） |
+| Phase 6 | ✅ Done | rustyline REPL（持久化历史、斜杠命令/工具名/路径补全、/thinking 切换、Ctrl-C 清上下文）；thinking_level 穿过 StreamRequest 由 provider 翻译为 reasoning_effort / Anthropic adaptive effort |
 | Phase 7 | 🔲 Planned | ratatui TUI（纯 `TuiEventAdapter` 先行，对齐原版 `tui/adapter.py` 分层） |
 | Phase 8 | 🔲 Planned | OAuth 流、openai-codex/google/mistral 适配器、skills/context 文件、session 导出、扩展再评估 |
 

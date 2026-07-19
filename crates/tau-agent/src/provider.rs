@@ -20,6 +20,11 @@ pub struct StreamRequest<'a> {
     pub messages: &'a [AgentMessage],
     pub tools: &'a [AgentTool],
     pub signal: Option<CancellationToken>,
+    /// Optional thinking/reasoning-effort level (e.g. `"low"`, `"high"`).
+    /// Providers translate this into their vendor-specific parameter via the
+    /// catalog `thinking_parameter` mapping. `None` leaves the provider
+    /// default. Mirrors the original `tau_coding.thinking.ThinkingLevel`.
+    pub thinking_level: Option<&'a str>,
 }
 
 use crate::tool::AgentTool;

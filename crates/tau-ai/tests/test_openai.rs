@@ -137,7 +137,7 @@ async fn openai_simple_text_stream() {
     let tools: Vec<AgentTool> = vec![];
 
     let events =
-        collect_events(provider.stream_response("You are helpful.", &messages, &tools)).await;
+        collect_events(provider.stream_response("You are helpful.", &messages, &tools, None)).await;
 
     assert!(matches!(events[0], ProviderEvent::ResponseStart { .. }));
     assert!(matches!(&events[1], ProviderEvent::TextDelta(t) if t == "Hello"));
@@ -162,7 +162,7 @@ async fn openai_tool_use_stream() {
     let tools = vec![test_tool()];
 
     let events =
-        collect_events(provider.stream_response("You are helpful.", &messages, &tools)).await;
+        collect_events(provider.stream_response("You are helpful.", &messages, &tools, None)).await;
 
     assert!(matches!(events[0], ProviderEvent::ResponseStart { .. }));
     if let ProviderEvent::ToolCall(tc) = &events[1] {
@@ -199,7 +199,7 @@ async fn openai_reasoning_stream() {
     let tools: Vec<AgentTool> = vec![];
 
     let events =
-        collect_events(provider.stream_response("You are helpful.", &messages, &tools)).await;
+        collect_events(provider.stream_response("You are helpful.", &messages, &tools, None)).await;
 
     assert!(matches!(events[0], ProviderEvent::ResponseStart { .. }));
     assert!(matches!(&events[1], ProviderEvent::ThinkingDelta(t) if t == "Let me think..."));
@@ -226,7 +226,7 @@ async fn openai_http_error_response() {
     let tools: Vec<AgentTool> = vec![];
 
     let events =
-        collect_events(provider.stream_response("You are helpful.", &messages, &tools)).await;
+        collect_events(provider.stream_response("You are helpful.", &messages, &tools, None)).await;
 
     assert_eq!(events.len(), 1);
     assert!(matches!(&events[0], ProviderEvent::Error { message, .. } if message.contains("401")));
@@ -248,7 +248,7 @@ async fn openai_request_body_has_correct_shape() {
     let tools = vec![test_tool()];
 
     let _events =
-        collect_events(provider.stream_response("System prompt", &messages, &tools)).await;
+        collect_events(provider.stream_response("System prompt", &messages, &tools, None)).await;
 
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 1);

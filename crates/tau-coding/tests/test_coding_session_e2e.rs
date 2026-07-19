@@ -45,6 +45,7 @@ async fn prompt_persists_user_and_assistant_with_parent_chain() {
         context_window: None,
         compaction_reserve: 16384,
         provider_name: None,
+        thinking_level: None,
     };
     let mut session = CodingSession::new(storage, cfg);
     session.write_session_info().await.unwrap();
@@ -112,6 +113,7 @@ async fn prompt_persists_multiple_turns_chaining_off_previous_assistant() {
         context_window: None,
         compaction_reserve: 16384,
         provider_name: None,
+        thinking_level: None,
     };
     let mut session = CodingSession::new(storage, cfg);
     session.write_session_info().await.unwrap();
@@ -195,6 +197,7 @@ async fn load_reconstructs_prior_conversation_in_harness_messages() {
             context_window: None,
             compaction_reserve: 16384,
             provider_name: None,
+            thinking_level: None,
         },
     );
     session.write_session_info().await.unwrap();
@@ -219,6 +222,7 @@ async fn load_reconstructs_prior_conversation_in_harness_messages() {
             context_window: None,
             compaction_reserve: 16384,
             provider_name: None,
+            thinking_level: None,
         },
     )
     .await
@@ -261,6 +265,7 @@ async fn load_reconstructs_prior_conversation_in_harness_messages() {
             context_window: None,
             compaction_reserve: 16384,
             provider_name: None,
+            thinking_level: None,
         };
         // Swap provider & rebuild: easiest re-load (load keeps the file as-is).
         // This relies on `load` reconstructing from the file — the harness

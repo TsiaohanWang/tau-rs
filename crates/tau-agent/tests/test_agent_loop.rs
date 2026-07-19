@@ -132,6 +132,7 @@ async fn test_agent_loop_streams_canonical_nested_events() {
         get_follow_up_messages: None,
         before_tool_call: None,
         after_tool_call: None,
+        thinking_level: None,
     }))
     .await;
 
@@ -190,6 +191,7 @@ async fn test_agent_loop_nests_thinking_events_without_losing_final_message() {
         get_follow_up_messages: None,
         before_tool_call: None,
         after_tool_call: None,
+        thinking_level: None,
     }))
     .await;
 
@@ -263,6 +265,7 @@ async fn test_agent_loop_executes_tool_and_emits_tool_result_message_lifecycle()
         get_follow_up_messages: None,
         before_tool_call: None,
         after_tool_call: None,
+        thinking_level: None,
     }))
     .await;
 
@@ -326,6 +329,7 @@ async fn test_agent_loop_records_unknown_tool_as_canonical_error_result() {
         get_follow_up_messages: None,
         before_tool_call: None,
         after_tool_call: None,
+        thinking_level: None,
     }))
     .await;
 
@@ -368,6 +372,7 @@ async fn test_agent_loop_converts_provider_error_to_assistant_error_message() {
         get_follow_up_messages: None,
         before_tool_call: None,
         after_tool_call: None,
+        thinking_level: None,
     }))
     .await;
 
@@ -423,6 +428,7 @@ async fn test_agent_loop_stops_with_assistant_error_after_max_turns() {
         get_follow_up_messages: None,
         before_tool_call: None,
         after_tool_call: None,
+        thinking_level: None,
     }))
     .await;
 

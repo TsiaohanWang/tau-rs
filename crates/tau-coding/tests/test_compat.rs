@@ -309,6 +309,7 @@ async fn resume_loads_python_style_session() {
         context_window: None,
         compaction_reserve: 16384,
         provider_name: None,
+        thinking_level: None,
     };
     let session = CodingSession::load(storage, config)
         .await
