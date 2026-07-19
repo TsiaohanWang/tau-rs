@@ -186,23 +186,25 @@ fn parse_command(line: &str) -> Option<Command> { /* "/…" 前缀 */ }
 
 ---
 
-### 3.3 子阶段 5.3 — compaction 三触发（收尾 #8）
+### 3.3 子阶段 5.3 — compaction 三触发（收尾 #8）✅ Done
 
 **目标**：手动 / 阈值 / 溢出三条路径全通；接 harness。
 
 **修改**：
 - `crates/tau-coding/src/compaction_prompts.rs`（新）：`SUMMARIZATION_PROMPT` 与 `UPDATE_SUMMARIZATION_PROMPT`（从 Python `context_window.py` Rust 字面量翻译）。
+- `crates/tau-coding/src/session/compaction.rs`：新增 `build_compaction_summary_prompt()`、`serialize_messages_for_compaction()`、`summarization_system_prompt()` 及消息序列化辅助，完整移植 Python 的 `build_compaction_summary_prompt` / `serialize_messages_for_compaction`。
 - `crates/tau-coding/src/session/coding_session.rs`：
-  - `generate_summary` 改为 async：构造一个 `Vec<AgentMessage>` 含 SUMMARIZATION_PROMPT 作为 user，调 `self.harness.provider().stream_response(...)`（或新建 `AgentHarness::oneshot`）拿到 summary 文本。溢出退化路径：若 summary 调用本身又 fail，用现有 debug 格式 + 警告 log。
-  - `execute_compaction`：补 `harness.replace_messages(rebuilt)` 调用（ADR-P5-3 第三步）。
+  - `generate_summary` 改为 async：构造单个 user message 含 `build_compaction_summary_prompt` 输出，调 `provider.stream_response(...)` 拿到 summary 文本。溢出退化路径：若 summary 调用本身又 fail 或返回空，用 debug 格式 + 警告。
+  - `execute_compaction`：补 `harness.replace_messages(rebuilt)` 调用（ADR-P5-3 第三步，已落地）。
   - `prompt`：pre-prompt 阈值检查已骨架，补 `context_window` 字段从 catalog `context_windows[model]` 自动读取（目前 config 由外部喂，5.3 时在 `CodingSessionConfig::from_catalog` 构造助手）。
-  - 溢出重试：`prompt` 的 wrap stream 在收到 `MessageEnd(stop_reason=Error, message matches overflow)` 时，若**未在重试中**则触发一次 compaction 后再发同一 prompt；用 `self.is_retrying_compaction: bool` 防止无限循环。
+  - 溢出重试：`prompt` 的 wrap stream 在收到 `MessageEnd(stop_reason=Error, message matches overflow)` 时，若**未在重试中**则触发一次 compaction 后再发同一 prompt；用 `self.is_retrying_compaction: bool` 防止无限循环。重试前先 drain 当前 harness stream 释放 `running` 锁。
 - `crates/tau-coding/src/commands.rs`（新，沿用 5.4 的 commander）：`Command::Compact` 调 `session.execute_compaction(plan_compaction(...))`。
 
 **验收**：
-- 单测 `generate_summary`：用 `FakeProvider`（从 `tau-agent/testing` feature 拿）返回预定 summary 文本。
-- 单测溢出重试：FakeProvider 第一次返回 `stop_reason=Error` 带溢出关键字，第二次返回正常 → 断言只调用两次且成功。
-- 单测 compaction 后 `harness.messages().len()` 比之前少（说明 `replace_messages` 真接上了）。
+- ✅ 单测 `generate_summary`：用 `FakeProvider` 返回预定 summary 文本（`generate_summary_uses_llm_provider`）。
+- ✅ 单测溢出重试：`FakeProvider` 第一次返回 `stop_reason=Error` 带溢出关键字，第二次返回正常 → 断言调用 3 次（原始 + compaction + retry）且成功（`overflow_retry_compacts_and_retries_once`）。
+- ✅ 单测 compaction 后 `messages.len()` 比之前少（`execute_compaction_reduces_harness_messages`）。
+- ✅ 退化路径单测：LLM 返回空 → 回退 debug 格式（`generate_summary_falls_back_when_llm_empty`）。
 
 ---
 

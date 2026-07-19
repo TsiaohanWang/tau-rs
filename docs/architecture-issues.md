@@ -162,7 +162,7 @@ Verified with live `--print` against `opencode/deepseek-v4-flash-free` (entries 
 
 ---
 
-### Issue #8: 无 compaction
+### Issue #8: 无 compaction ✅ Fixed (Phase 5.3)
 
 **Location**: `crates/tau-agent/src/session/state.rs:108` — `apply_compaction` (replay side exists); no creation-side code anywhere.
 
@@ -181,6 +181,15 @@ Verified with live `--print` against `opencode/deepseek-v4-flash-free` (entries 
 - `generate_compaction_summary(provider, plan) -> String` (calls the model)
 - `apply_and_persist(session, plan, summary)` (appends `CompactionEntry`)
 - Auto-trigger: before each `prompt()`, check threshold; on context overflow error, compact + retry once.
+
+**Fixed (Phase 5.3)**:
+- `crates/tau-coding/src/compaction_prompts.rs` — `SUMMARIZATION_PROMPT` / `UPDATE_SUMMARIZATION_PROMPT` / `SUMMARIZATION_SYSTEM_PROMPT` 移植自 Python `context_window.py`。
+- `crates/tau-coding/src/session/compaction.rs` — `build_compaction_summary_prompt()` 完整移植 Python `build_compaction_summary_prompt`（含 `serialize_messages_for_compaction` + `split_previous_compaction_summary`）。
+- `crates/tau-coding/src/session/coding_session.rs`：
+  - 三触发路径全通：① pre-prompt 阈值检查（phase 5.2 起已就绪，context_window 配置驱动）；② `/compact` 命令（5.4 接入 `commands.rs`）；③ 溢出错误 `MessageEnd(stop_reason=Error)` 时触发一次 compaction + 同 prompt 重试（`is_retrying_compaction` 防循环，重试前 drain 当前 stream 释放 harness `running` 锁）。
+  - `generate_summary` 改为 async，真正调用 `provider.stream_response` 拿 LLM 摘要；失败/空响应回退 debug 格式。
+  - `execute_compaction` 已接 `harness.replace_messages(rebuilt)`。
+- 单测：`generate_summary_uses_llm_provider`、`generate_summary_falls_back_when_llm_empty`、`overflow_retry_compacts_and_retries_once`、`execute_compaction_reduces_harness_messages`。
 
 ---
 
@@ -298,15 +307,15 @@ pub enum ToolExecutionMode {
 ### Issue #15: 文档测试计数不一致
 
 **Location**:
-- `docs/architecture.md` — now 142 tests (updated)
+- `docs/architecture.md` — now 150 tests (updated)
 - `docs/phase-4.md` — now 149 total including Phase 4 extras (fixed)
-- `README.md` — badge says 142 (updated)
+- `README.md` — badge says 150 (updated)
 
 **Problem**: `architecture.md` was not updated when Phase 4 landed. The Phase 3 commit updated README but not architecture.md's test count.
 
 **Impact**: Misleading for contributors evaluating project health.
 
-**Fix**: Updated all docs to current 142 count.
+**Fix**: Updated all docs to current 150 count.
 
 ---
 

@@ -1,4 +1,9 @@
-use tau_types::{AgentMessage, CompactionEntry, new_entry_id};
+use tau_types::{AgentMessage, AssistantContent, CompactionEntry, new_entry_id};
+
+use crate::compaction_prompts::{
+    COMPACTION_SUMMARY_PREFIX, SUMMARIZATION_PROMPT, SUMMARIZATION_SYSTEM_PROMPT,
+    SUMMARY_MESSAGE_CHAR_LIMIT, UPDATE_SUMMARIZATION_PROMPT,
+};
 
 use super::context_window::estimate_context_usage;
 
@@ -75,6 +80,154 @@ pub fn create_compaction_entry(plan: &CompactionPlan) -> CompactionEntry {
         summary,
         replaces_entry_ids: plan.entry_ids.clone(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Compaction summary prompt construction
+// ---------------------------------------------------------------------------
+
+/// Serialize a single message for inclusion in the compaction prompt.
+///
+/// Mirrors Python's `serialize_messages_for_compaction`. Each message is
+/// wrapped in `<message index=N role=...>` tags, with tool calls and text
+/// content placed inside. Output is truncated to
+/// [`SUMMARY_MESSAGE_CHAR_LIMIT`] characters per message.
+fn serialize_message_for_compaction(index: usize, msg: &AgentMessage) -> String {
+    let role = match msg {
+        AgentMessage::User(_) => "user",
+        AgentMessage::Assistant(_) => "assistant",
+        AgentMessage::ToolResult(_) => "tool",
+        AgentMessage::BashExecution(_) => "bash",
+        _ => "unknown",
+    };
+
+    let mut attrs = format!("index={index} role={role}");
+
+    if let AgentMessage::ToolResult(t) = msg {
+        attrs += &format!(" name={} error={}", t.tool_name, t.is_error);
+    }
+
+    let mut inner = String::new();
+
+    let text = msg.text();
+    if !text.is_empty() {
+        inner.push_str(&truncate_for_summary(&text));
+        inner.push('\n');
+    }
+
+    // Append tool calls for assistant messages.
+    if let AgentMessage::Assistant(a) = msg {
+        let tool_calls: Vec<String> = a
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                AssistantContent::ToolCall(tc) => Some(format!(
+                    "- {}: {}",
+                    tc.name,
+                    serde_json::Value::Object(tc.arguments.clone())
+                )),
+                _ => None,
+            })
+            .collect();
+        if !tool_calls.is_empty() {
+            inner.push_str("<tool-calls>\n");
+            for tc in &tool_calls {
+                inner.push_str(tc);
+                inner.push('\n');
+            }
+            inner.push_str("</tool-calls>\n");
+        }
+    }
+
+    format!("<message {attrs}>\n{inner}</message>")
+}
+
+/// Build the full user-prompt text sent to the summarization model.
+///
+/// Mirrors Python's `build_compaction_summary_prompt`. Detects whether the
+/// first message is an existing compaction summary and uses the appropriate
+/// base prompt (`SUMMARIZATION_PROMPT` vs `UPDATE_SUMMARIZATION_PROMPT`).
+pub fn build_compaction_summary_prompt(messages: &[AgentMessage]) -> String {
+    let (previous_summary, new_messages) = split_previous_compaction_summary(messages);
+
+    let conversation = serialize_messages_for_compaction(new_messages);
+    let mut prompt = format!("<conversation>\n{conversation}\n</conversation>\n\n");
+
+    let base_prompt = if previous_summary.is_some() {
+        UPDATE_SUMMARIZATION_PROMPT
+    } else {
+        SUMMARIZATION_PROMPT
+    };
+
+    if let Some(ref summary) = previous_summary {
+        prompt += &format!("<previous-summary>\n{summary}\n</previous-summary>\n\n");
+    }
+
+    prompt += base_prompt;
+    prompt
+}
+
+/// Return the summarization system prompt.
+pub fn summarization_system_prompt() -> &'static str {
+    SUMMARIZATION_SYSTEM_PROMPT
+}
+
+/// Serialize a slice of messages into the compaction-prompt format.
+///
+/// Each message is wrapped in `<message>` tags. Returns
+/// `"(no new messages)"` when the input is empty.
+fn serialize_messages_for_compaction(messages: &[AgentMessage]) -> String {
+    if messages.is_empty() {
+        return "(no new messages)".to_string();
+    }
+
+    messages
+        .iter()
+        .enumerate()
+        .map(|(i, msg)| serialize_message_for_compaction(i + 1, msg))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Check whether the first message is an existing compaction summary and
+/// split it off from the rest of the messages.
+///
+/// Returns `(previous_summary, remaining_messages)`. If there is no existing
+/// summary the first element is `None` and all messages are returned as-is.
+fn split_previous_compaction_summary(
+    messages: &[AgentMessage],
+) -> (Option<String>, &[AgentMessage]) {
+    if messages.is_empty() {
+        return (None, messages);
+    }
+
+    let first = &messages[0];
+    if !matches!(first, AgentMessage::User(_)) {
+        return (None, messages);
+    }
+
+    let text = first.text();
+    if !text.starts_with(COMPACTION_SUMMARY_PREFIX) {
+        return (None, messages);
+    }
+
+    let summary = text[COMPACTION_SUMMARY_PREFIX.len()..].to_string();
+    (Some(summary), &messages[1..])
+}
+
+/// Truncate text for inclusion in a compaction summary message.
+fn truncate_for_summary(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.len() <= SUMMARY_MESSAGE_CHAR_LIMIT {
+        return collapsed;
+    }
+    let truncated: String = collapsed
+        .chars()
+        .take(SUMMARY_MESSAGE_CHAR_LIMIT - 3)
+        .collect();
+    // Trim to a valid UTF-8 boundary.
+    let truncated = truncated.trim_end().to_string();
+    format!("{truncated}...")
 }
 
 #[cfg(test)]

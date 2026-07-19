@@ -3,13 +3,14 @@ use std::sync::Arc;
 use async_stream::stream;
 use futures::stream::StreamExt;
 use tau_agent::harness::{AgentHarness, AgentHarnessConfig, QueueMode};
-use tau_agent::provider::ModelProvider;
+use tau_agent::provider::{ModelProvider, StreamRequest};
 use tau_agent::session::state::{LeafSelector, SessionState};
 use tau_agent::tool::AgentTool;
 use tau_types::{AgentEvent, AgentMessage, SessionEntry};
 
 use crate::prompt::build_system_prompt;
 use crate::session::compaction::{CompactionPlan, create_compaction_entry, plan_compaction};
+use crate::session::compaction::{build_compaction_summary_prompt, summarization_system_prompt};
 use crate::session::context_window::{estimate_context_usage, needs_compaction};
 use crate::session::repair::repair_interrupted_tool_calls;
 use crate::session::storage::{JsonlSessionStorage, SessionError};
@@ -48,6 +49,10 @@ pub struct CodingSession {
     messages: Vec<AgentMessage>,
     entry_ids: Vec<String>,
     config: CodingSessionConfig,
+    /// Guard flag to prevent compaction-retry loops: when an overflow error
+    /// triggers a compaction + retry, this is set to `true` so that if the
+    /// retried call also fails we do not compact again.
+    is_retrying_compaction: bool,
 }
 
 impl CodingSession {
@@ -75,6 +80,7 @@ impl CodingSession {
             messages: Vec::new(),
             entry_ids: Vec::new(),
             config,
+            is_retrying_compaction: false,
         }
     }
 
@@ -137,6 +143,7 @@ impl CodingSession {
             messages,
             entry_ids,
             config,
+            is_retrying_compaction: false,
         })
     }
 
@@ -212,21 +219,50 @@ impl CodingSession {
                 }
             }
 
-            // 2. Start the harness run. `&mut self` forbids two concurrent
-            //    streams, so `Err` here is a logic bug — fail closed by
-            //    returning early (caller's consumer loop simply ends).
+            // 2. Start the harness run.
             let inner = match self.harness.prompt(text) {
                 Ok(s) => s,
                 Err(_) => return,
             };
 
-            // 3. Drive the harness. The agent loop yields one `MessageEnd` per
-            //    message it sees — including the user prompt it just loaded —
-            //    so this persistence hook covers user + assistant uniformly.
-            //    `persist_with_parent` advances `last_entry_id`, giving every
-            //    subsequent entry the correct parent.
+            // 3. Drive the harness, watching for context-overflow errors.
             futures::pin_mut!(inner);
             while let Some(ev) = inner.next().await {
+                // Check for overflow error on MessageEnd → trigger one-shot
+                // compaction + retry (ADR-P5-3 overflow path).
+                if let AgentEvent::MessageEnd(ref end) = ev {
+                    if !self.is_retrying_compaction && is_overflow_error(&end.message) {
+                        self.is_retrying_compaction = true;
+                        // Plan compaction: free enough tokens to continue.
+                        let estimate = estimate_context_usage(&self.messages, &[]);
+                        let window = self.config.context_window.unwrap_or(128_000);
+                        let reserve = self.config.compaction_reserve;
+
+                        let target = estimate.estimated_tokens.saturating_sub(window - reserve);
+                        if let Some(plan) = plan_compaction(&self.messages, &self.entry_ids, target) {
+                            let _ = self.execute_compaction(plan).await;
+                        }
+                        // Yield the error event first so the caller sees it,
+                        // then re-drive from the same prompt text.
+                        yield ev;
+                        // Drain the rest of the current harness stream so its
+                        // RAII `MessagesGuard` drops and releases the harness's
+                        // `running` lock before we start the retry run.
+                        while inner.next().await.is_some() {}
+                        let retry_inner = match self.harness.prompt(text) {
+                            Ok(s) => s,
+                            Err(_) => return,
+                        };
+                        futures::pin_mut!(retry_inner);
+                        while let Some(retry_ev) = retry_inner.next().await {
+                            if let AgentEvent::MessageEnd(ref retry_end) = retry_ev {
+                                let _ = self.persist_with_parent(retry_end.message.clone()).await;
+                            }
+                            yield retry_ev;
+                        }
+                        return;
+                    }
+                }
                 if let AgentEvent::MessageEnd(ref end) = ev {
                     let _ = self.persist_with_parent(end.message.clone()).await;
                 }
@@ -266,7 +302,7 @@ impl CodingSession {
         &mut self,
         plan: CompactionPlan,
     ) -> Result<Option<String>, SessionError> {
-        let summary = self.generate_summary(&plan);
+        let summary = self.generate_summary(&plan).await;
         let mut filled = plan;
         filled.summary = Some(summary);
 
@@ -281,7 +317,47 @@ impl CodingSession {
         Ok(Some(compaction_id))
     }
 
-    fn generate_summary(&self, plan: &CompactionPlan) -> String {
+    /// Generate a summary of the messages targeted by the compaction plan.
+    ///
+    /// Builds a single-message prompt and calls the provider directly for
+    /// summarization (not via the harness, which would add tools + system).
+    /// Falls back to a deterministic debug-format string if the LLM call fails
+    /// (e.g. network error, rate limit, model refusal).
+    async fn generate_summary(&self, plan: &CompactionPlan) -> String {
+        let user_prompt = build_compaction_summary_prompt(&self.messages);
+
+        let user_message = AgentMessage::User(tau_types::UserMessage::new(user_prompt.as_str()));
+        let request = StreamRequest {
+            model: &self.config.model,
+            system: summarization_system_prompt(),
+            messages: &[user_message],
+            tools: &[],
+            signal: None,
+        };
+
+        let mut stream = self.config.provider.stream_response(&request);
+        let mut text = String::new();
+
+        while let Some(event) = stream.next().await {
+            if let tau_types::AssistantMessageEvent::TextDelta(delta) = event {
+                text.push_str(&delta.delta);
+            }
+            // We ignore other event types (ToolCall, Done, etc.) — the
+            // summarization prompt asks for text-only output.
+        }
+
+        if text.trim().is_empty() {
+            eprintln!(
+                "warning: LLM summarization returned empty text; falling back to debug summary"
+            );
+            self.generate_debug_summary(plan)
+        } else {
+            text.trim().to_string()
+        }
+    }
+
+    /// Deterministic fallback summary when the LLM call fails or returns empty.
+    fn generate_debug_summary(&self, plan: &CompactionPlan) -> String {
         let parts: Vec<String> = self
             .messages
             .iter()
@@ -319,12 +395,32 @@ impl CodingSession {
             self.entry_ids.extend(remaining_ids);
 
             // Push the rebuilt list into the harness so the next prompt starts
-            // from post-compaction state. ADR-P5-3 §3.3 step 3 — full wiring of
-            // `replace_messages` lands in 5.3 (currently the harness keeps its
-            // own parallel list; 5.3 will canonicalize on `self.messages`).
+            // from post-compaction state. ADR-P5-3 §3.3 step 3 — the harness
+            // now canonicalizes on `self.messages` after compaction.
             self.harness.replace_messages(self.messages.clone());
         }
     }
+}
+
+/// Detect a provider context-overflow error in a final assistant message.
+///
+/// Overflow errors surface as `stop_reason = Error` with keywords like
+/// "context length", "token limit", or "context window" in the text. Used to
+/// trigger a one-shot compaction + retry.
+fn is_overflow_error(message: &AgentMessage) -> bool {
+    let is_error_stop = matches!(
+        message,
+        AgentMessage::Assistant(a) if a.stop_reason == tau_types::StopReason::Error
+    );
+    if !is_error_stop {
+        return false;
+    }
+    let text = message.text().to_ascii_lowercase();
+    text.contains("context length")
+        || text.contains("context window")
+        || text.contains("token limit")
+        || text.contains("too long")
+        || text.contains("maximum context")
 }
 
 #[cfg(test)]
@@ -397,5 +493,216 @@ mod tests {
         let entries = s.storage().read_all().await.unwrap();
         assert_eq!(entries.len(), 1);
         assert!(matches!(entries[0], SessionEntry::SessionInfo(_)));
+    }
+
+    // --- Phase 5.3: compaction / summarization tests -----------------------
+
+    /// Build a session backed by a `FakeProvider` that serves the given
+    /// event batches per `stream_response` call (in order).
+    fn make_session_with_provider(
+        dir: &TempDir,
+        provider: Arc<dyn ModelProvider + Send + Sync>,
+        context_window: Option<u64>,
+    ) -> CodingSession {
+        let storage = JsonlSessionStorage::new(dir.path().join("s.jsonl"));
+        CodingSession::new(
+            storage,
+            CodingSessionConfig {
+                provider,
+                model: "test-model".into(),
+                system: None,
+                cwd: dir.path().to_path_buf(),
+                max_turns: Some(20),
+                context_window,
+                compaction_reserve: 16384,
+            },
+        )
+    }
+
+    async fn assistant_with_text(text: &str) -> tau_types::AssistantMessage {
+        let mut a = tau_types::AssistantMessage::default();
+        a.content.push(tau_types::AssistantContent::Text(
+            tau_types::TextContent::new(text),
+        ));
+        a.stop_reason = tau_types::StopReason::Stop;
+        a
+    }
+
+    fn overflow_error_message() -> tau_types::AssistantMessage {
+        let mut a = tau_types::AssistantMessage::default();
+        a.content.push(tau_types::AssistantContent::Text(
+            tau_types::TextContent::new("maximum context length exceeded"),
+        ));
+        a.stop_reason = tau_types::StopReason::Error;
+        a.error_message = Some("maximum context length exceeded".to_string());
+        a
+    }
+
+    #[tokio::test]
+    async fn generate_summary_uses_llm_provider() {
+        use tau_agent::testing::{assistant_done, assistant_start, text_delta};
+
+        let dir = TempDir::new().unwrap();
+        // Provider serves a single batch: a summary text + done.
+        let provider = Arc::new(tau_agent::testing::FakeProvider::with_events(vec![
+            assistant_start(None, None),
+            text_delta("## Goal\nBuild the parser.\n## Progress\n- [x] scaffold"),
+            assistant_done(assistant_with_text("## Goal\nBuild the parser.").await),
+        ]));
+        let mut session = make_session_with_provider(&dir, provider, None);
+
+        // Seed a couple of messages so the summary prompt has content.
+        session
+            .persist_with_parent(AgentMessage::User(UserMessage::new("build a parser")))
+            .await
+            .unwrap();
+        session
+            .persist_with_parent(AgentMessage::Assistant(assistant_with_text("ok").await))
+            .await
+            .unwrap();
+
+        let plan = CompactionPlan {
+            entry_ids: session.entry_ids.clone(),
+            summary: None,
+        };
+        let summary = session.generate_summary(&plan).await;
+        assert!(
+            summary.contains("Build the parser"),
+            "summary should reflect the LLM output, got: {summary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_summary_falls_back_when_llm_empty() {
+        use tau_agent::testing::{assistant_done, assistant_start};
+
+        let dir = TempDir::new().unwrap();
+        // Provider returns Done with no text deltas → empty summary → fallback.
+        let provider = Arc::new(tau_agent::testing::FakeProvider::with_events(vec![
+            assistant_start(None, None),
+            assistant_done(assistant_with_text("").await),
+        ]));
+        let mut session = make_session_with_provider(&dir, provider, None);
+        session
+            .persist_with_parent(AgentMessage::User(UserMessage::new("hi")))
+            .await
+            .unwrap();
+
+        let plan = CompactionPlan {
+            entry_ids: session.entry_ids.clone(),
+            summary: None,
+        };
+        let summary = session.generate_summary(&plan).await;
+        assert!(
+            summary.starts_with("[Compacted"),
+            "empty LLM summary must fall back to debug format, got: {summary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn overflow_retry_compacts_and_retries_once() {
+        use tau_agent::testing::{assistant_done, assistant_start, text_delta};
+
+        let dir = TempDir::new().unwrap();
+        // Batch order:
+        //   0: first harness prompt → overflow error
+        //   1: compaction summarization call → summary text
+        //   2: retry harness prompt → success
+        let provider = Arc::new(tau_agent::testing::FakeProvider::new(vec![
+            vec![
+                assistant_start(None, None),
+                assistant_done(overflow_error_message()),
+            ],
+            vec![
+                assistant_start(None, None),
+                text_delta("## Goal\nDone."),
+                assistant_done(assistant_with_text("## Goal\nDone.").await),
+            ],
+            vec![
+                assistant_start(None, None),
+                text_delta("retry answer"),
+                assistant_done(assistant_with_text("retry answer").await),
+            ],
+        ]));
+
+        let mut session = make_session_with_provider(&dir, provider.clone(), None);
+
+        // Seed enough history that the threshold check could trigger, but the
+        // key assertion is the overflow retry path.
+        session
+            .persist_with_parent(AgentMessage::User(UserMessage::new("first")))
+            .await
+            .unwrap();
+
+        let stream = session.prompt("overflow now").unwrap();
+        futures::pin_mut!(stream);
+        let mut saw_assistant = false;
+        while let Some(ev) = stream.next().await {
+            if let tau_types::AgentEvent::MessageEnd(end) = ev {
+                if matches!(end.message, AgentMessage::Assistant(_)) {
+                    saw_assistant = true;
+                }
+            }
+        }
+
+        assert!(
+            saw_assistant,
+            "retry should yield a successful assistant turn"
+        );
+        // 3 provider calls: original, compaction, retry.
+        assert_eq!(
+            provider.call_count(),
+            3,
+            "overflow must trigger exactly one compaction + one retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_compaction_reduces_harness_messages() {
+        use tau_agent::testing::{assistant_done, assistant_start, text_delta};
+
+        let dir = TempDir::new().unwrap();
+        let provider = Arc::new(tau_agent::testing::FakeProvider::new(vec![vec![
+            assistant_start(None, None),
+            text_delta("summary text"),
+            assistant_done(assistant_with_text("summary text").await),
+        ]]));
+
+        let mut session = make_session_with_provider(&dir, provider, None);
+        // 4 messages: user, assistant, user, assistant (each long enough to
+        // estimate > 0 tokens so the compaction plan can free multiple).
+        for i in 0..2 {
+            let long = format!("message number {i} with enough content to exceed four chars");
+            session
+                .persist_with_parent(AgentMessage::User(UserMessage::new(long.clone())))
+                .await
+                .unwrap();
+            session
+                .persist_with_parent(AgentMessage::Assistant(assistant_with_text(&long).await))
+                .await
+                .unwrap();
+        }
+        let before = session.messages.len();
+        assert_eq!(before, 4);
+
+        // Target 20 tokens: with ~13 tokens per message this compacts the
+        // first two messages (26 >= 20), leaving [summary] + 2 = 3.
+        let plan = plan_compaction(&session.messages, &session.entry_ids, 20).unwrap();
+        assert!(
+            plan.entry_ids.len() >= 2,
+            "plan should compact multiple messages"
+        );
+        session.execute_compaction(plan).await.unwrap();
+
+        let after = session.messages.len();
+        assert!(
+            after < before,
+            "compaction should reduce message count: {before} → {after}"
+        );
+        // After compaction the first message is the summary placeholder.
+        assert!(
+            matches!(session.messages.first(), Some(AgentMessage::User(_))),
+            "first message after compaction should be the summary"
+        );
     }
 }
