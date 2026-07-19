@@ -554,6 +554,123 @@ cargo build -p tau-cli --features tui --release
 # deepseek, nvidia, xai, xiaomi, github-copilot, ...)
 ```
 
+---
+
+### TUI 使用指南
+
+TUI 模式是 Phase 7 的核心成果，基于 **ratatui + crossterm** 重写了原版 Python Textual 前端（6070 行 `app.py`），对齐原版 `tui/adapter.py`/`state.py` 分层。
+
+#### 特性
+
+| 功能 | 说明 | 状态 |
+|------|------|------|
+| Transcript 面板 | 滚动显示 User/Assistant/Tool/Thinking/Error 消息，role 配色区分 | ✅ |
+| Input 输入条 | 行编辑（光标移动、退格）、发送/steer 一体化 | ✅ |
+| Status 状态栏 | 运行状态（● idle / ● running）、模型名、thinking 级别、队列数 | ✅ |
+| 工具结果折叠/展开 | `Ctrl-O` 切换；默认折叠显示摘要，展开预览截断 2000 字符 | ✅ |
+| Thinking 块显示/隐藏 | `Ctrl-T` 切换；默认隐藏，打开后 ThinkingContent 以灰色斜体显示 | ✅ |
+| 自动滚动 | 新消息到达时自动跳到底部；PageUp/↑ 浏览历史时暂停自动滚动 | ✅ |
+| 流式输出 | 实时显示 assistant 文字增量（TextDelta）+ thinking 增量（ThinkingDelta） | ✅ |
+| 取消 / Steer | `Esc` 取消当前流，`Enter` 在运行中发送 steer 消息 | ✅ |
+| Resume 恢复 | `--resume latest` 从 `~/.tau/sessions/` 重新加载历史消息到 transcript | ✅ |
+| 斜杠命令 | `/help` `/model` `/provider` `/thinking` `/clear` `/compact` `/exit` | ✅ |
+| Shell 转义 | `! command` 执行 bash 命令，输出以 System 角色显示 | ✅ |
+
+#### 架构约束
+
+TUI crate（`tau-cli/src/tui/`）**仅依赖 `tau-types` 事件 + `CodingSession` 只读接口**，绝不反向依赖 `tau-agent`/`tau-ai` 的 HTTP 实现。steer/cancel 通过克隆 `AgentHarness` 句柄实现，避免 `&mut session` 与 live stream 的借用冲突。
+
+> 完整架构说明见 `docs/architecture.md` §4 Phase 7。
+
+#### 编译与运行
+
+```bash
+# ===== 在 Cargo.toml 中启用 tui feature =====
+# crates/tau-cli/Cargo.toml 已经配置：
+#   [features]
+#   tui = ["dep:ratatui", "dep:crossterm"]
+# 无需手动修改
+
+# ===== 编译（默认不含 tui）=====
+cargo build --workspace --release
+# 二进制不包含 ratatui，体积更小
+
+# ===== 编译（含 tui）=====
+cargo build -p tau-cli --features tui --release
+
+# ===== 运行 =====
+# 必须在真实终端中运行（不支持 pipe / redirect / IDE 内置终端可能不兼容）
+./target/release/tau -P opencode --tui
+
+# ===== 常用组合 =====
+# 指定模型
+./target/release/tau -P opencode -m deepseek-v4-flash-free --tui
+# Resume 上一个 session
+./target/release/tau -P opencode --resume latest --tui
+# Verbose 模式（显示 session 路径）
+./target/release/tau -P opencode -v --tui
+```
+
+#### 界面布局
+
+```
+┌─────────────────────────────────────────────┐
+│  Transcript                                 │ ⬆ 消息面板（自动滚动）
+│                                             │
+│  You                                        │
+│  写一个斐波那契函数                           │
+│                                             │
+│  Assistant                                  │
+│  以下是 Rust 实现：                           │
+│  fn fib(n: u64) -> u64 { ... }             │  ← PageUp/↓ 浏览
+│    [stop]                                   │
+│                                             │
+│  Tool → write src/main.rs                   │  ← Ctrl-O 展开详情
+│    (result hidden; Ctrl-O to toggle)        │
+│                                             │
+│  Tool ✓ bash                                │
+│    $ cargo run                              │
+│    output: 55                               │
+│                                             │
+├─────────────────────────────────────────────┤
+│  Input                             │  › 你好的 │ 输入条
+├─────────────────────────────────────────────┤
+│  ● running | model: nemotron-3-ultra-free  │ 状态栏
+│  | think: off | queued: 0                   │
+└─────────────────────────────────────────────┘
+```
+
+#### 滚动操作
+
+- **自动滚动**：新消息到达时自动跳到底部（默认行为）
+- **手动向上滚动**：按 `PageUp` 或 `↑` 浏览历史消息，自动滚动暂停
+- **手动向下滚动**：按 `PageDown` 或 `↓` 向下翻
+- **恢复自动滚动**：按 `Ctrl-L` 跳到底部并恢复自动滚动
+
+> 提示：在长对话中，如果想查看之前的输出，按 `PageUp` 向上滚动；完成后按 `Ctrl-L` 回到最新消息。
+
+#### Cargo.toml 配置参考
+
+```toml
+# crates/tau-cli/Cargo.toml
+[dependencies]
+ratatui = { version = "0.29", optional = true }
+crossterm = { version = "0.28", optional = true }
+
+[features]
+default = []
+tui = ["dep:ratatui", "dep:crossterm"]
+```
+
+#### 已知限制
+
+| 限制 | 说明 | 计划 |
+|------|------|------|
+| 无 autocomplete | TUI 输入条暂不支持 Tab 补全（REPL 有） | Phase 8 |
+| 无 file tree panel | 原版有 sidebar 显示项目文件树 | Phase 8 |
+| 无 session tree picker | resume 需通过 `--resume <id>` CLI 传入 | Phase 8 |
+| TUI 需要真实 TTY | `crossterm::enable_raw_mode()` 需要终端 ioctl | 无法绕过 |
+
 #### API Key Configuration
 
 ```bash
