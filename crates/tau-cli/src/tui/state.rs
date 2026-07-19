@@ -362,6 +362,7 @@ impl TuiState {
         self.add_item(ChatItemRole::Error, format!("Error: {text}"));
     }
 
+    #[allow(dead_code)]
     fn flush_assistant_buffer(&mut self) {
         if !self.assistant_buffer.is_empty() {
             let text = std::mem::take(&mut self.assistant_buffer);
@@ -382,7 +383,10 @@ impl TuiState {
             // Drop the provisional buffered rows (which occupy [start..]).
             self.items.truncate(start);
         }
-        self.flush_assistant_buffer();
+        // Do NOT flush the assistant_buffer here — the canonical message in
+        // add_assistant_message already contains the final text.  If we
+        // flushed, we'd add the same text twice (once from the delta buffer,
+        // once from the canonical content).
         if message.stop_reason == tau_types::StopReason::Error
             || message.stop_reason == tau_types::StopReason::Aborted
         {

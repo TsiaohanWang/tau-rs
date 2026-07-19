@@ -256,6 +256,9 @@ async fn handle_idle_key(
             let c = app.cursor;
             app.cursor = cursor_byte_backspace(&mut app.input, c);
         }
+        KeyCode::Delete => {
+            cursor_byte_delete(&mut app.input, app.cursor);
+        }
         KeyCode::Left => {
             app.cursor = cursor_byte_left(&app.input, app.cursor);
         }
@@ -452,6 +455,9 @@ fn handle_streaming_key(app: &mut App, key: crossterm::event::KeyEvent, harness:
             let c = app.cursor;
             app.cursor = cursor_byte_backspace(&mut app.input, c);
         }
+        KeyCode::Delete => {
+            cursor_byte_delete(&mut app.input, app.cursor);
+        }
         KeyCode::Left => {
             app.cursor = cursor_byte_left(&app.input, app.cursor);
         }
@@ -509,6 +515,17 @@ fn cursor_byte_backspace(s: &mut String, cursor: usize) -> usize {
         byte_pos
     } else {
         cursor
+    }
+}
+
+/// Delete: remove the character at/after the cursor. Cursor position
+/// stays the same (the next character slides into its place).
+fn cursor_byte_delete(s: &mut String, cursor: usize) {
+    if cursor >= s.len() {
+        return;
+    }
+    if let Some((_, ch)) = s[cursor..].char_indices().next() {
+        s.drain(cursor..cursor + ch.len_utf8());
     }
 }
 
