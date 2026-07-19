@@ -1,6 +1,7 @@
 pub mod bash;
 pub mod edit;
 pub mod read;
+pub mod unix_kill;
 pub mod write;
 
 use std::path::Path;

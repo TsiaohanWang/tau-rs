@@ -187,6 +187,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[allow(unsafe_code)]
     #[test]
     fn resolve_api_key_from_env() {
         let dir = tmp_dir();

@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+
 pub mod anthropic;
 pub mod http;
 pub mod openai;

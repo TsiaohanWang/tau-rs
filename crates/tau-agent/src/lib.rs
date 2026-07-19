@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+
 pub mod agent_loop;
 pub mod harness;
 pub mod provider;

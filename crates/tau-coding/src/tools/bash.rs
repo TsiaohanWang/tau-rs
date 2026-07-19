@@ -66,9 +66,7 @@ impl ToolExecutor for BashExecutor {
             Some(tokio::spawn(async move {
                 signal.cancelled().await;
                 if let Some(pid) = child_id {
-                    unsafe {
-                        libc::killpg(pid as i32, libc::SIGTERM);
-                    }
+                    crate::tools::unix_kill::kill_process_group(pid);
                 }
             }))
         } else {

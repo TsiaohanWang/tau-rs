@@ -1,3 +1,4 @@
+#![deny(unsafe_code)]
 //! Tau wire contract: provider-neutral Pi data models shared by every layer.
 //!
 //! This crate is intentionally free of async runtime and HTTP concerns. It owns

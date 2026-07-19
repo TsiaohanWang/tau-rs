@@ -8,7 +8,7 @@
 use serde_json::Value;
 
 /// A single parsed SSE event payload.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SseEvent {
     /// A JSON data payload from a `data: <json>` line.
     Data(Value),
@@ -104,6 +104,7 @@ impl SseAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn parses_data_line() {
@@ -145,6 +146,50 @@ mod tests {
         match ev {
             SseEvent::Data(v) => assert_eq!(v["type"], "delta"),
             _ => panic!("expected Data"),
+        }
+    }
+
+    // --- Property-based / robustness tests (see docs/review-2026-07-19.md P0-b) ---
+    // SSE parsing consumes untrusted network input; these guards ensure no
+    // input can panic or yield non-deterministic results.
+
+    proptest! {
+        /// Arbitrary input must never panic and must be deterministic.
+        #[test]
+        fn parse_sse_line_never_panics_and_is_deterministic(line in ".*") {
+            let a = parse_sse_line(&line);
+            let b = parse_sse_line(&line);
+            prop_assert_eq!(a, b);
+        }
+
+        /// A line shaped as `data: <json>` must round-trip to the same Value.
+        /// We generate an arbitrary Rust string and serialize it as a proper
+        /// JSON string literal, so the payload is always valid JSON.
+        #[test]
+        fn data_line_roundtrips_json(raw in ".*") {
+            let value = serde_json::Value::String(raw.clone());
+            let payload = serde_json::to_string(&value).unwrap();
+            let line = format!("data: {}", payload);
+            match parse_sse_line(&line) {
+                Some(SseEvent::Data(v)) => prop_assert_eq!(v, value),
+                other => prop_assert!(false, "expected Data, got {:?}", other),
+            }
+        }
+
+        /// The accumulator must be a pure function of its fed lines.
+        #[test]
+        fn accumulator_is_deterministic(lines in proptest::collection::vec(".*", 0..12)) {
+            let mut acc1 = SseAccumulator::new();
+            let mut acc2 = SseAccumulator::new();
+            let mut out1 = Vec::new();
+            let mut out2 = Vec::new();
+            for l in &lines {
+                if let Some(e) = acc1.feed(l) { out1.push(e); }
+                if let Some(e) = acc2.feed(l) { out2.push(e); }
+            }
+            if let Some(e) = acc1.flush() { out1.push(e); }
+            if let Some(e) = acc2.flush() { out2.push(e); }
+            prop_assert_eq!(out1, out2);
         }
     }
 }

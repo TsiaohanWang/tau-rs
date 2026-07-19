@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+
 pub mod commands;
 pub mod compaction_prompts;
 pub mod config;
