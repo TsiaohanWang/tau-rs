@@ -6,10 +6,12 @@
 //! `tau_coding/tui/app.py` is the port reference, but we adapt its event loop
 //! to a crossterm + `tokio::select!` model.
 //!
-//! Streaming model: while a prompt is running we drive `CodingSession::prompt`
-//! (which borrows `&mut session`) inside a *nested* loop. Steering / cancel /
-//! queue inspection go through a *cloned* `AgentHarness` handle so they don't
-//! need `&mut session` and conflict with the live stream borrow.
+//! Streaming model: while idle the outer loop draws and processes key events.
+//! When Enter fires a prompt, we enter an inner `tokio::select!` loop that
+//! drives the `CodingSession::prompt` stream (which borrows `&mut session`)
+//! together with **the same** key channel (for steer, cancel, scrolling) and
+//! per-frame redraw.  A cloned `AgentHarness` handle provides steer/cancel/
+//! queue without needing `&mut session` during the stream.
 
 use std::io::{self, Stdout};
 use std::path::Path;
@@ -31,7 +33,7 @@ use tau_coding::shell_escape;
 use tokio::sync::mpsc;
 
 use crate::tui::adapter::TuiEventAdapter;
-use crate::tui::state::TuiState;
+use crate::tui::state::{ChatItemRole, TuiState};
 use crate::tui::ui;
 
 const DRAW_TICK: Duration = Duration::from_millis(80);
@@ -64,6 +66,11 @@ impl App {
     fn state_mut(&mut self) -> &mut TuiState {
         self.adapter.state_mut()
     }
+
+    fn clear_input(&mut self) {
+        self.input.clear();
+        self.cursor = 0;
+    }
 }
 
 /// Run the interactive TUI.
@@ -82,7 +89,7 @@ pub async fn run(
     app.state_mut().load_messages(&session.messages());
     if verbose {
         app.state_mut().add_item_with(
-            crate::tui::state::ChatItemRole::System,
+            ChatItemRole::System,
             format!("session: {}", session.storage().path().display()),
             None,
             None,
@@ -95,6 +102,7 @@ pub async fn run(
     let mut terminal = setup_terminal()?;
 
     let (key_tx, mut key_rx) = mpsc::unbounded_channel::<CEvent>();
+    // Single key reader — reused for both idle and streaming states.
     let reader = tokio::spawn(async move {
         while let Ok(ev) = event::read() {
             if key_tx.send(ev).is_err() {
@@ -120,7 +128,9 @@ pub async fn run(
     result
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Outer loop: idle → draw + wait for key.  When Enter fires a prompt,
+/// call `dispatch_line` which runs the stream to completion in an inner
+/// select! loop that also processes keys and redraws every tick.
 async fn app_loop(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
@@ -130,25 +140,12 @@ async fn app_loop(
     key_rx: &mut mpsc::UnboundedReceiver<CEvent>,
 ) -> Result<()> {
     loop {
-        {
-            let mut frame = terminal.get_frame();
-            ui::draw(
-                &mut frame,
-                app.state(),
-                &app.input,
-                app.cursor,
-                &app.model,
-                &app.thinking_level,
-                app.running,
-                harness,
-            );
-        }
-        terminal.flush()?;
+        draw_frame(terminal, app, harness);
 
         tokio::select! {
             maybe_key = key_rx.recv() => {
                 if let Some(CEvent::Key(key)) = maybe_key {
-                    if handle_key(app, key, session, harness, cwd).await? {
+                    if handle_idle_key(app, key, session, harness, cwd, terminal, key_rx).await? {
                         return Ok(());
                     }
                 }
@@ -158,33 +155,57 @@ async fn app_loop(
     }
 }
 
+fn draw_frame(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &App,
+    harness: &AgentHarness,
+) {
+    let mut frame = terminal.get_frame();
+    ui::draw(
+        &mut frame,
+        app.state(),
+        &app.input,
+        app.cursor,
+        &app.model,
+        &app.thinking_level,
+        app.running,
+        harness,
+    );
+    let _ = terminal.flush();
+}
+
+/// Handle a key when idle (no active stream).
 /// Returns `true` if the app should quit.
-async fn handle_key(
+async fn handle_idle_key(
     app: &mut App,
     key: crossterm::event::KeyEvent,
     session: &mut CodingSession,
     harness: &AgentHarness,
     cwd: &Path,
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    key_rx: &mut mpsc::UnboundedReceiver<CEvent>,
 ) -> Result<bool> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
     match (ctrl, key.code) {
         (true, KeyCode::Char('c')) => {
-            if app.running {
-                harness.cancel();
-            } else {
-                session.clear_messages();
-                app.state_mut().clear();
-            }
-            Ok(false)
+            session.clear_messages();
+            app.state_mut().clear();
+            app.clear_input();
+            return Ok(false);
         }
-        (true, KeyCode::Char('d')) => Ok(true),
+        (true, KeyCode::Char('d')) => return Ok(true),
         (true, KeyCode::Char('o')) => {
             app.state_mut().toggle_tool_results();
-            Ok(false)
+            return Ok(false);
         }
         (true, KeyCode::Char('t')) => {
             app.state_mut().toggle_thinking();
-            Ok(false)
+            return Ok(false);
+        }
+        (true, KeyCode::Char('l')) => {
+            app.state_mut().scroll_to_bottom();
+            return Ok(false);
         }
         (_, KeyCode::Enter) => {
             let line = app.input.trim().to_string();
@@ -192,86 +213,103 @@ async fn handle_key(
                 let input = std::mem::take(&mut app.input);
                 app.cursor = 0;
                 app.running = true;
-                run_prompt(app, session, harness, &input, cwd).await?;
+                app.state_mut().auto_scroll = true;
+
+                if dispatch_line(app, session, harness, &input, cwd).await? {
+                    return Ok(true);
+                }
+
+                // Back to idle — run the prompt stream with concurrent key
+                // handling and redraw.
+                let mut stream = Box::pin(session.prompt(&input)?);
+                run_stream_loop(app, &mut stream, harness, terminal, key_rx).await?;
                 app.running = false;
             }
-            Ok(false)
+            return Ok(false);
         }
-        (_, KeyCode::Esc) => {
-            if app.running {
-                harness.cancel();
-            }
-            Ok(false)
+        (_, KeyCode::PageUp) => {
+            app.state_mut().page_up(10);
+            return Ok(false);
         }
-        (_, KeyCode::Char(ch)) => {
+        (_, KeyCode::PageDown) => {
+            app.state_mut().page_down(10);
+            return Ok(false);
+        }
+        (_, KeyCode::Up) => {
+            app.state_mut().scroll_up(1);
+            return Ok(false);
+        }
+        (_, KeyCode::Down) => {
+            app.state_mut().scroll_down(1);
+            return Ok(false);
+        }
+        _ => {}
+    }
+
+    // Input editing
+    match key.code {
+        KeyCode::Char(ch) => {
             app.input.insert(app.cursor, ch);
             app.cursor += 1;
-            Ok(false)
         }
-        (_, KeyCode::Backspace) => {
+        KeyCode::Backspace => {
             if app.cursor > 0 {
                 app.cursor -= 1;
                 app.input.remove(app.cursor);
             }
-            Ok(false)
         }
-        (_, KeyCode::Left) => {
+        KeyCode::Left => {
             if app.cursor > 0 {
                 app.cursor -= 1;
             }
-            Ok(false)
         }
-        (_, KeyCode::Right) => {
+        KeyCode::Right => {
             if app.cursor < app.input.len() {
                 app.cursor += 1;
             }
-            Ok(false)
         }
-        (_, KeyCode::Home) => {
+        KeyCode::Home => {
             app.cursor = 0;
-            Ok(false)
         }
-        (_, KeyCode::End) => {
+        KeyCode::End => {
             app.cursor = app.input.len();
-            Ok(false)
         }
-        _ => Ok(false),
+        _ => {}
     }
+
+    Ok(false)
 }
 
-/// Dispatch one input line, mirroring the REPL's shell-escape / slash-command /
-/// chat precedence, then stream the resulting prompt into the adapter.
-async fn run_prompt(
+/// Dispatch one input line (shell/command).  Returns `true` if the app
+/// should quit.  For chat messages this is a no-op (the calller handles
+/// stream initiation).
+async fn dispatch_line(
     app: &mut App,
     session: &mut CodingSession,
     harness: &AgentHarness,
     line: &str,
     cwd: &Path,
-) -> Result<()> {
+) -> Result<bool> {
     harness.cancel();
 
     if let Some(shell) = shell_escape::parse_shell(line) {
         let output = shell_escape::run(&shell, cwd, None).await;
-        app.state_mut().add_item_with(
-            crate::tui::state::ChatItemRole::System,
-            output,
-            None,
-            None,
-            false,
-            None,
-            None,
-        );
-        return Ok(());
+        app.state_mut()
+            .add_item_with(ChatItemRole::System, output, None, None, false, None, None);
+        return Ok(false);
     }
 
     if let Some(parsed) = commands::parse(line) {
         match parsed {
             Ok(cmd) => match commands::dispatch(session, cmd, cwd).await {
-                Ok(commands::CommandOutcome::Quit) => {}
-                Ok(commands::CommandOutcome::ClearMessages) => app.state_mut().clear(),
+                Ok(commands::CommandOutcome::Quit) => return Ok(true),
+                Ok(commands::CommandOutcome::ClearMessages) => {
+                    app.state_mut().clear();
+                    app.clear_input();
+                }
                 Ok(commands::CommandOutcome::Handled(msg)) => {
                     app.state_mut().add_item_with(
-                        crate::tui::state::ChatItemRole::System,
+                        ChatItemRole::System,
                         msg,
                         None,
                         None,
@@ -282,7 +320,7 @@ async fn run_prompt(
                 }
                 Err(e) => {
                     app.state_mut().add_item_with(
-                        crate::tui::state::ChatItemRole::Error,
+                        ChatItemRole::Error,
                         format!("error: {e}"),
                         None,
                         None,
@@ -294,7 +332,7 @@ async fn run_prompt(
             },
             Err(msg) => {
                 app.state_mut().add_item_with(
-                    crate::tui::state::ChatItemRole::Error,
+                    ChatItemRole::Error,
                     msg,
                     None,
                     None,
@@ -304,28 +342,142 @@ async fn run_prompt(
                 );
             }
         }
-        return Ok(());
+        return Ok(false);
     }
 
-    app.state_mut().add_user_message(line, None, None);
-    run_stream(app, session, line).await?;
-    Ok(())
+    // Chat message: the adapter adds User from the stream's MessageEnd(User)
+    // event — do NOT call add_user_message here or it doubles.
+    Ok(false)
 }
 
-async fn run_stream(app: &mut App, session: &mut CodingSession, text: &str) -> Result<()> {
-    let mut stream = Box::pin(session.prompt(text)?);
+/// Inner loop: drive the prompt stream with concurrent key handling and
+/// per-frame redraw, using the **same** key channel as the outer loop.
+async fn run_stream_loop(
+    app: &mut App,
+    stream: &mut (impl futures::Stream<Item = tau_types::AgentEvent> + std::marker::Unpin + Send),
+    harness: &AgentHarness,
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    key_rx: &mut mpsc::UnboundedReceiver<CEvent>,
+) -> Result<()> {
     loop {
+        draw_frame(terminal, app, harness);
+
         tokio::select! {
+            maybe_key = key_rx.recv() => {
+                if let Some(CEvent::Key(key)) = maybe_key {
+                    handle_streaming_key(app, key, harness);
+                }
+            }
             maybe_ev = stream.next() => {
                 match maybe_ev {
-                    Some(ev) => app.adapter.apply(&ev),
-                    None => break,
+                    Some(ev) => {
+                        app.adapter.apply(&ev);
+                        app.state_mut().scroll_to_bottom();
+                    }
+                    None => {
+                        app.state_mut().scroll_to_bottom();
+                        return Ok(());
+                    }
                 }
             }
             _ = tokio::time::sleep(DRAW_TICK) => {}
         }
     }
-    Ok(())
+}
+
+/// Key handler during active streaming — only a subset of keys is meaningful.
+fn handle_streaming_key(app: &mut App, key: crossterm::event::KeyEvent, harness: &AgentHarness) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+    // Cancel / steer
+    match key.code {
+        KeyCode::Esc => {
+            harness.cancel();
+            return;
+        }
+        KeyCode::Enter => {
+            let input = std::mem::take(&mut app.input);
+            let trimmed = input.trim().to_string();
+            if !trimmed.is_empty() {
+                harness.steer(trimmed);
+            }
+            app.cursor = 0;
+            return;
+        }
+        _ => {}
+    }
+
+    match (ctrl, key.code) {
+        (true, KeyCode::Char('c')) => {
+            harness.cancel();
+            return;
+        }
+        (true, KeyCode::Char('o')) => {
+            app.state_mut().toggle_tool_results();
+            return;
+        }
+        (true, KeyCode::Char('t')) => {
+            app.state_mut().toggle_thinking();
+            return;
+        }
+        (true, KeyCode::Char('l')) => {
+            app.state_mut().scroll_to_bottom();
+            return;
+        }
+        _ => {}
+    }
+
+    // Scroll
+    match key.code {
+        KeyCode::PageUp => {
+            app.state_mut().page_up(10);
+            return;
+        }
+        KeyCode::PageDown => {
+            app.state_mut().page_down(10);
+            return;
+        }
+        KeyCode::Up => {
+            app.state_mut().scroll_up(1);
+            return;
+        }
+        KeyCode::Down => {
+            app.state_mut().scroll_down(1);
+            return;
+        }
+        _ => {}
+    }
+
+    // Input editing (for steer text)
+    match key.code {
+        KeyCode::Char(ch) => {
+            app.input.insert(app.cursor, ch);
+            app.cursor += 1;
+        }
+        KeyCode::Backspace => {
+            if app.cursor > 0 {
+                app.cursor -= 1;
+                app.input.remove(app.cursor);
+            }
+        }
+        KeyCode::Left => {
+            if app.cursor > 0 {
+                app.cursor -= 1;
+            }
+        }
+        KeyCode::Right => {
+            if app.cursor < app.input.len() {
+                app.cursor += 1;
+            }
+        }
+        KeyCode::Home => {
+            app.cursor = 0;
+        }
+        KeyCode::End => {
+            app.cursor = app.input.len();
+        }
+        _ => {}
+    }
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {

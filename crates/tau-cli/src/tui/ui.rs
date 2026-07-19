@@ -63,18 +63,26 @@ fn draw_transcript(frame: &mut ratatui::Frame<'_>, state: &TuiState, area: Rect)
     }
 
     let total = lines.len();
+    let visible = area.height as usize;
+    // Compute actual scroll offset: when auto-scrolling, stick to bottom
+    let scroll_row = if state.auto_scroll {
+        total.saturating_sub(visible) as u16
+    } else {
+        state
+            .scroll_offset_rows
+            .min(total.saturating_sub(visible) as u16)
+    };
     let para = Paragraph::new(Text::from(lines))
         .wrap(Wrap { trim: false })
-        .scroll(state.scroll_offset());
+        .scroll((scroll_row, 0));
     frame.render_widget(para, area);
 
-    if total > area.height as usize {
-        let pos = total.saturating_sub((area.height as usize).min(total));
-        let mut scroll = ScrollbarState::new(total).position(pos);
+    if total > visible {
+        let mut scrollbar = ScrollbarState::new(total).position(scroll_row as usize);
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight),
             area,
-            &mut scroll,
+            &mut scrollbar,
         );
     }
 }

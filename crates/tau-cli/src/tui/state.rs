@@ -86,6 +86,8 @@ pub struct TuiState {
     pub error: Option<String>,
     pub show_tool_results: bool,
     pub show_thinking: bool,
+    pub scroll_offset_rows: u16,
+    pub auto_scroll: bool,
     assistant_start_index: Option<usize>,
     tool_items_by_call_id: HashMap<String, usize>,
 }
@@ -108,9 +110,52 @@ impl TuiState {
         self.show_thinking
     }
 
+    #[allow(dead_code)]
+    pub fn queued_message_count(&self) -> usize {
+        0
+    }
+
+    #[allow(dead_code)]
+    pub fn set_queue_count(&mut self, _count: usize) {}
+
+    /// Update the queued-message count from harneess.
+    #[allow(dead_code)]
+    pub fn update_queue(&mut self, _total: usize) {}
+
+    /// Scroll down (away from the newest message) — increase offset.
+    pub fn scroll_down(&mut self, rows: u16) {
+        self.scroll_offset_rows = self.scroll_offset_rows.saturating_add(rows);
+        self.auto_scroll = false;
+    }
+
+    /// Scroll up (toward the newest message) — decrease offset.
+    pub fn scroll_up(&mut self, rows: u16) {
+        self.scroll_offset_rows = self.scroll_offset_rows.saturating_sub(rows);
+        self.auto_scroll = self.scroll_offset_rows == 0;
+    }
+
+    /// Page up — scroll up by a page.
+    pub fn page_up(&mut self, page_lines: u16) {
+        self.scroll_offset_rows = self.scroll_offset_rows.saturating_sub(page_lines);
+        self.auto_scroll = self.scroll_offset_rows == 0;
+    }
+
+    /// Page down — scroll down by a page.
+    pub fn page_down(&mut self, page_lines: u16) {
+        self.scroll_offset_rows = self.scroll_offset_rows.saturating_add(page_lines);
+        self.auto_scroll = false;
+    }
+
+    /// Jump to the newest message (bottom).
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_offset_rows = 0;
+        self.auto_scroll = true;
+    }
+
     /// Transcript scroll offset for the paragraph widget (top-anchored for now).
+    #[allow(dead_code)]
     pub fn scroll_offset(&self) -> (u16, u16) {
-        (0, 0)
+        (self.scroll_offset_rows, 0)
     }
 
     pub(crate) fn add_item(&mut self, role: ChatItemRole, text: String) -> &mut ChatItem {
