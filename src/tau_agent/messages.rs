@@ -1898,30 +1898,26 @@ mod tests {
         }
 
         assert!(
-            serde_json::from_str::<AssistantMessage>(
-                r#"{"role":"assistant","stopReason":"nope"}"
-            )
-            .is_err()
+            serde_json::from_str::<AssistantMessage>(r#"{"role":"assistant","stopReason":"nope"}"#)
+                .is_err()
         );
     }
 
     #[test]
     fn unsigned_fields_reject_negative_values_and_exit_code_is_signed() {
         assert!(
-            serde_json::from_str::<AgentMessage>(r#"{"role":"user","content":"x","timestamp":-1}"#
-            )
-            .is_err()
+            serde_json::from_str::<AgentMessage>(r#"{"role":"user","content":"x","timestamp":-1}"#)
+                .is_err()
         );
         assert!(
             serde_json::from_str::<AgentMessage>(
-                r#"{"role":"compactionSummary","summary":"s","tokensBefore":-1}"
+                r#"{"role":"compactionSummary","summary":"s","tokensBefore":-1}"#
             )
             .is_err()
         );
         assert!(
-            serde_json::from_str::<AgentMessage>(r#"{"role":"assistant","usage":{"input":-1}}"#
-            )
-            .is_err()
+            serde_json::from_str::<AgentMessage>(r#"{"role":"assistant","usage":{"input":-1}}"#)
+                .is_err()
         );
 
         let bash: BashExecutionMessage = serde_json::from_str(

@@ -48,7 +48,7 @@
 | Python | Rust | 状态 |
 |---|---|---|
 | `src/tau_agent/types.py` | `src/tau_agent/types.rs` | ✅（`JSONPrimitive` 由 `serde_json::Value` 覆盖，无需单独别名） |
-| `src/tau_agent/messages.py` | `src/tau_agent/messages.rs` | ✅ 32 tests |
+| `src/tau_agent/messages.py` | `src/tau_agent/messages.rs` | ✅ 33 tests |
 | `src/tau_agent/provider_events.py` | `src/tau_agent/provider_events.rs` | ✅ 8 tests |
 | `src/tau_agent/tools.py` | `src/tau_agent/tools.rs` | ⬜ 下一个候选 |
 | `src/tau_agent/provider.py` | `src/tau_agent/provider.rs` | ⬜ 受 async 决策阻塞 |
@@ -213,11 +213,13 @@ for role in [MessageRole::User, MessageRole::Assistant, /* ... */] {
 ### 5.3 DoD
 
 - [ ] `cargo fmt --check` 干净
-- [ ] `cargo test` 全绿
+- [ ] `cargo test` 全绿，且新增 `#[test]` 的数量与 `cargo test` 实际运行数一致
 - [ ] `cargo clippy` 除 dead_code 外无告警
 - [ ] 模块头 deviations 完整；每个差异点有理由注释
 - [ ] 本文第 7 节状态表已更新
 - [ ] 新取舍已补 ADR
+
+> 真实教训：漏写 `r#"..."#` 的结尾 `#` 会把后续测试吞进字符串，rustfmt / clippy / 编译都不报错，只是该测试静默不再运行。新增测试后必须核对数量（可用 `grep -c '#\[test\]'` 与 `cargo test -- --list` 对照）。
 
 ---
 
@@ -279,7 +281,7 @@ for role in [MessageRole::User, MessageRole::Assistant, /* ... */] {
 ### 7.1 已完成
 
 - `types.rs`：`JsonValue` / `JsonObject` 别名。
-- `messages.rs`（32 tests）：全部消息与内容模型；wire 契约由 Python 输出逐字节锁定；含 acceptance corpus、全量 alias/数值边界/角色覆盖。
+- `messages.rs`（33 tests）：全部消息与内容模型；wire 契约由 Python 输出逐字节锁定；含 acceptance corpus、全量 alias/数值边界/角色覆盖。
 - `provider_events.rs`（8 tests）：12 种流事件 + tagged union；全事件 snake_case 与 `partial()` 覆盖。
 
 ### 7.2 建议顺序与已知坑
@@ -486,7 +488,7 @@ for label, payload in cases:
 | 17 | Cargo integration tests 各自是独立 crate，只能访问 library 的 public API | Cargo Book `cargo-targets` 原文："Cargo will compile each of these files as a separate crate ... Integration tests can use the public API of the package's library." |
 | 18 | pydantic smart union ≠ 严格 left-to-right：按序尝试并继续寻找更优匹配 | pydantic 2.13 unions 文档原文 + Python 探针（`str \| int` 行为） |
 | 19 | pydantic discriminated union 提取不到 tag 时报 `union_tag_not_found` | pydantic 2.13 unions 文档 + Python 探针 |
-| 20 | 模块行数、测试数、目录状态（§3、§7.1） | `wc -l` 实测；`cargo test` = messages 32 + provider_events 8 = 40；`tests/fixtures/` 为空；`src/tau_ai/*.rs` 为 0 行 |
+| 20 | 模块行数、测试数、目录状态（§3、§7.1） | `wc -l` 实测；`cargo test` = messages 33 + provider_events 8 = 41；`tests/fixtures/` 为空；`src/tau_ai/*.rs` 为 0 行 |
 
 **复跑探针**
 
