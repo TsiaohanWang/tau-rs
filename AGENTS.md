@@ -1,12 +1,24 @@
 # tau-rs 重写指南（Python → Rust）
 
 > 本文档是 tau-rs 的**权威重写约定与决策记录**，面向所有参与重写的工程师与 AGENT。
-> 开工任何模块前请完整读一遍；模块完成后回来更新第 7 节状态表，新取舍补进第 6 节 ADR。
+> 开工任何模块前请完整读一遍；模块完成后回来更新 §7 状态表、§5.2 分歧登记与 §6 ADR。
 >
 > - Python 权威源：`../tau/src/`（与 `tau-rs/` 同级目录），解释器 `../tau/.venv/bin/python`。
 > - 本文语言约定：正文中文，标识符、命令、代码保持英文原文。
-> - 冲突处理：Python 源码 > 本文 ADR > 本文其他描述。任何"顺手修正"都要先升级为 ADR。
+> - 冲突处理：**Python 源码是 wire 行为的基准；§6 ADR 明确记录的有意差异以 ADR 为准**；其余冲突以 Python 为准。任何"顺手修正"都要先升级为 ADR。
 > - 事实性断言于 2026-09-18 对照固定版本（pydantic 2.13.4 / serde 1.0.229 / serde_json 1.0.151 / futures-core 0.3.34）逐条验证，证据见 §10.4；升级依赖后必须重跑探针。
+
+---
+
+## 0. 给 AGENT 的快速导航
+
+- **任务**：把 `../tau/src/tau_agent`（之后是 `tau_ai`）逐模块改写成 Rust，wire 行为与 Python 等价。
+- **进度与下一步**：§3 状态表 + §7.2 顺序列表。
+- **写代码前必读**：§1 总原则、§4 Golden Rules；对照样板 `messages.rs`、`provider_events.rs`、`tools.rs`、`provider.rs`。
+- **写测试前必读**：§5；改 wire 模型必须先重生差分语料。
+- **硬性禁令**：§7.3。
+- **已决问题不要重开**：§6 ADR；只有新的取舍才新增 ADR。
+- **模块头注释是实现的权威细节**：每个模块头必须写 Python 来源与 deviations 索引（ADR-009）。
 
 ---
 
@@ -32,11 +44,13 @@
 
 1. 通读 Python 原文件：先 imports 与 `__all__`，再模型，再函数。
 2. **用 Python 实测语义，不要凭印象。** pydantic 行为常常反直觉：缺 discriminator、`validate_by_name`、`_to_camel` + `str.title()` 的数字坑、smart union 顺序、`exclude_none`。先写 10 行脚本跑 `validate_python` / `model_dump_json` 看结果。
-3. 生成 goldens：把 Python 的真实输出贴进 Rust 测试。至少覆盖典型值、空值、边界、legacy 形状。
-4. 写 Rust：模块头 deviations + 第 4 节通用约定 + 结构体/函数。
-5. 写测试：双端差分语料（§5.1）+ exact-string + drift test（见第 5 节）。
-6. `cargo fmt` → `cargo test` → `cargo clippy`（除 dead_code 外必须清零）。
-7. 更新本文第 7 节状态表；有新取舍补 ADR。
+3. 定测试期望：
+   - wire 模型 → 在 `tools/model_corpus.py` 补 normal / extreme / edge 三类 case（§5.1）；
+   - 仅内部行为或一次性断言 → 用 Python 实跑输出做 golden（§10.2）。
+4. 写 Rust：模块头 deviations + §4 通用约定 + 结构体/函数。
+5. 写测试：先 `./tools/fixtures.sh` 重生语料，再补模块单测（§5.3 / §5.4）。
+6. `cargo fmt` → `cargo test` → `./tools/fixtures.sh --check` → `cargo clippy --all-targets`（除 dead_code 外必须清零）。
+7. 更新 §7.1 状态表与 §5.2 分歧登记；有新取舍补 §6 ADR。
 8. 提交：一个模块一个原子提交，信息写明"模块 + 对的 wire 行为范围"。
 
 ---
@@ -54,8 +68,8 @@
 | `src/tau_agent/provider.py` | `src/tau_agent/provider.rs` | ✅ 1 test（`tests/provider.rs`；ADR-010：`futures-core::Stream`） |
 | `src/tau_agent/events.py` | `src/tau_agent/events.rs` | ⬜ |
 | `src/tau_agent/tool_history.py` | `src/tau_agent/tool_history.rs` | ⬜ |
-| `src/tau_agent/harness.py` | `src/tau_agent/harness.rs` | ⬜ 下一步（ADR-010 已定） |
-| `src/tau_agent/loop.py` | `src/tau_agent/loop.rs` | ⬜ 下一步（ADR-010 已定） |
+| `src/tau_agent/harness.py` | `src/tau_agent/harness.rs` | ⬜ |
+| `src/tau_agent/loop.py` | `src/tau_agent/loop.rs` | ⬜ |
 | `src/tau_agent/session/entries.py` | `src/tau_agent/session/entries.rs` | ⬜ |
 | `src/tau_agent/session/jsonl.py` | `src/tau_agent/session/jsonl.rs` | ⬜ 迁移边界 |
 | `src/tau_agent/session/storage.py` | `src/tau_agent/session/storage.rs` | ⬜ |
@@ -68,7 +82,7 @@
 
 - 一个 Python 模块对一个 Rust 文件；不要合并或拆分（除非 ADR 说明）。
 - 模块声明集中在 `src/tau_agent/mod.rs`、未来的 `src/tau_ai/mod.rs`。
-- 目前是单 binary crate（`src/main.rs`）。是否增加 `lib.rs` 见第 8 节。
+- 目前是单 binary crate（`src/main.rs`）。是否增加 `lib.rs` 见 §8。
 - 生产文件（`messages.rs` 等）只放重写代码；测试统一放 `src/tau_agent/tests/`（`<module>.rs` / `differential.rs` / `support.rs`）。
 - crate 根的 `tests/fixtures/` 只放数据（差分语料、legacy session JSONL），`tools/` 只放语料源与生成脚本；两者都不参与生产编译。
 
@@ -102,7 +116,7 @@ pub(crate) struct Example {
   - 动态默认值（timestamp、`"unknown"`、`true`）→ `#[serde(default = "fn")]`
   - `Option<T>` 缺失自动为 `None`，不要再加 default
 - **容器级 `#[serde(default)]` 只在"所有缺省值都能由 `Default` 表达，且没有必填判别子"时使用。** 反例：`AssistantMessage` 最初用了容器级 default，导致缺 `role` 的对象被静默当成 assistant。现在改为逐字段默认，`role` 必填。
-- 显式 `null` 需要回退默认值时用 `deserialize_null_default`（对应 Python `model_validator` 把 `usage=None` 改写为 `Usage()`）。
+- 显式 `null` 需要回退默认值时，用 `messages.rs` 的私有 helper `deserialize_null_default` 作为样板（对应 Python `model_validator` 把 `usage=None` 改写为 `Usage()`）。当前只有 `AssistantMessage.usage` 需要它；若后续模块要用，先把它提升到共享位置再引用，不得各自发明不同语义。
 - Python 的 `before` validator 提供的便利输入（如 `content="..."`）默认不实现，统一交给迁移层或构造器（见 4.9）。
 
 ### 4.3 判别子（`Literal[...]` / discriminated union）
@@ -110,26 +124,25 @@ pub(crate) struct Example {
 Python 每个类一个 `Literal[...]` 字段；Rust 用：
 
 1. 一个共享 enum（`MessageRole`、`ContentType`、`StopReason`、`DoneReason`、`ErrorReason`…），`#[serde(rename_all = "camelCase")]`。
-2. 每个 struct 字段 `#[serde(deserialize_with = "xxx_role")]`；
+2. 判别字段（`role` / `type`）所在 struct 字段加 `#[serde(deserialize_with = "xxx_role")]`；非判别字段不需要；
 3. 一个 3 行的 `expect_*` helper + 每个判别子一行 wrapper（`user_role`、`assistant_role`…）；
 4. 有 Python 默认值的判别字段再加 `default = "default_xxx"`；
-5. `new()` / 构造函数固定判别子；**不 derive `Default`**（共享默认会给错判别子）；
+5. `new()` / 构造函数固定判别子；**带判别子的 struct 不 derive `Default`**（共享 `ContentType` / `MessageRole` 的默认会写出错的 tag）；纯枚举（`StopReason`、`ToolExecutionMode`）可以 derive 并用 `#[default]` 标默认变体。
 6. `as_str()` + `Display` + drift test（见 4.6）。
 
 代价（已接受，见 ADR-002）：struct literal 理论上能配错判别子；反序列化永远会校验。
 
 ### 4.4 联合类型（union）选型决策树
 
-先问两个问题：
-
-- (1) 具体类型会不会作为别的 struct 的普通字段被**单独序列化**？
-- (2) Python 那边是 discriminated union 还是 smart union？
+选型只看一个判据：**这个具体类型会不会作为别的 struct 的普通字段被单独序列化？**（同一类型族里只要有一个成员会，就按“会”处理。）
 
 | 情况 | 判据 | Rust 形态 | 现有例子 |
 |---|---|---|---|
-| A | 会单飞，且 Python 类自带 tag | tag 放 struct，父枚举 `#[serde(untagged)]`，靠字段校验分派 | `AssistantContent` / `ToolCall`（`toolcall_end.tool_call` 单飞）、`AgentMessage` |
-| B | 只经 union 使用，Python discriminated union | `#[serde(tag = "type")]`，payload 不带 tag | `AssistantMessageEvent`（未来的 `AgentEvent` 同型） |
-| C | 混合 | 先确认带 tag 的变体能否覆盖所有单飞位置；不能则按 A | — |
+| A | 会单飞；Python 类自带 tag | tag 放 struct，父枚举 `#[serde(untagged)]`，靠字段校验分派 | `AssistantContent` / `ToolCall`（`toolcall_end.tool_call` 单飞）、`AgentMessage` |
+| B | 不会单飞；Python discriminated union | `#[serde(tag = "type")]`，payload 不带 tag | `AssistantMessageEvent`（未来的 `AgentEvent` 同型） |
+| C | 同一类型族混合 | 按 A 处理；宁可多写每字段校验，也不要让成员单飞时丢 tag | — |
+
+判断对象是**具体类型**，不是“枚举整体”。
 
 - `#[serde(tag = "...")]` 与 payload 自带同名字段会冲突（序列化重复 key、反序列化缺字段），这不是风格问题。
 - untagged 的报错会变粗（`data did not match any variant ...`）；需要更好报错时由上层先读 raw value 的 tag 再分派，模型层保持简单。
@@ -146,7 +159,7 @@ Python 每个类一个 `Literal[...]` 字段；Rust 用：
 | `code: str \| int` | untagged `String \| i64` | Python 可负、无界 |
 | bool 字段 | `#[serde(default)]` | serde 不自动默认 |
 
-> ⚠️ session entry 的 timestamp 是 **float 秒**，messages 是 **int 毫秒**，不要混用（见 7.2 第 7 条）。
+> ⚠️ session entry 的 timestamp 是 **float 秒**，messages 是 **int 毫秒**，不要混用（见 §7.2 `session/entries.rs`）。
 
 ### 4.6 字符串映射
 
@@ -183,14 +196,14 @@ for role in [MessageRole::User, MessageRole::Assistant, /* ... */] {
 | 函数默认参数（如 `assistant_content(..., tool_calls=())`） | 必填 + `IntoIterator` | 调用点传 `[]` |
 | 无界 `int` | 明确宽度 | ADR-007 |
 | `dataclass(frozen=True, slots=True)` | 普通 struct + `Clone`/`Copy` | — |
-| `Protocol` | trait / trait object / 泛型 | 按模块决策（第 7、8 节） |
+| `Protocol` | 结构化子类型 | trait / 箱式闭包 / 泛型 | 先例：renderer·executor 用箱式闭包（`tools.rs`）；provider 用 trait + `futures-core::Stream`（ADR-010） |
 | `@model_validator(mode="before")` 的其它改写 | 具名 helper / 构造器 / 迁移 | 视语义 |
 | `isinstance` 分派 | 穷尽 `match` | — |
 
 ### 4.10 可见性、模块与依赖
 
 - 一切 `pub(crate)`：struct / enum / 字段 / 函数。字段直接 `pub(crate)`，不写 getter 层。
-- 不复制 Python `__init__.py` 的 facade 导出；模块间直接按路径引用（facade 问题见第 8 节）。
+- 不复制 Python `__init__.py` 的**聚合** facade（顶层一次性导出所有名字）；但**逐模块**的显式重导出照抄，例如 `tau_ai/events.py` → `tau_ai/events.rs`、`tau_ai/provider.py` → `tau_ai/provider.rs`。是否提供 `tau_agent` 顶层 facade 仍待定（§8）。
 - 模块头必须写：Python 来源、wire 契约、deviations 索引。
 - 依赖白名单：`serde`（derive）、`serde_json`（preserve_order）、`futures-core`（`Stream`，ADR-010）。新增依赖需 ADR。
 
@@ -228,7 +241,7 @@ wire 模型的行为由一套共享语料锁定：Python（pydantic）与 Rust�
 
 新增分歧必须同时改 `divergence` 与 `rust` 字段，并在本列表登记。
 
-### 5.3 其他测试（与语料并行保留）
+### 5.3 其他测试（与语料互补，仍必须写）
 
 1. **exact-string**：短 payload 的 wire 形状（字段顺序、null）逐字节锁定。
 2. **Value 对比**：大 payload（嵌套 `AssistantMessage` 等）用 `to_value` vs `json!({...})`。
@@ -251,9 +264,9 @@ wire 模型的行为由一套共享语料锁定：Python（pydantic）与 Rust�
 - [ ] 改了 wire 模型就先 `./tools/fixtures.sh` 重生语料，再 `cargo test`
 - [ ] `cargo test` 全绿，且新增 `#[test]` 的数量与 `cargo test` 实际运行数一致
 - [ ] `./tools/fixtures.sh --check` 通过（提交的 Python expected 未漂移）
-- [ ] `cargo clippy` 除 dead_code 外无告警
+- [ ] `cargo clippy --all-targets` 除 dead_code 外无告警
 - [ ] 模块头 deviations 完整；每个差异点有理由注释
-- [ ] 本文第 7 节状态表已更新；新取舍已补 ADR；新分歧已在 §5.2 登记
+- [ ] §7.1 状态表已更新；新取舍已补 ADR；新分歧已在 §5.2 登记
 
 > 真实教训：漏写 `r#"..."#` 的结尾 `#` 会把后续测试吞进字符串，rustfmt / clippy / 编译都不报错，只是该测试静默不再运行。新增测试后必须核对数量（可用 `grep -c '#\[test\]'` 与 `cargo test -- --list` 对照）。
 
@@ -301,9 +314,12 @@ wire 模型的行为由一套共享语料锁定：Python（pydantic）与 Rust�
 
 - 见 4.5 表格。无界 `int` 按语义选 `u64` / `usize` / `i32` / `i64`；越界与负数按格式错误拒绝。
 
-### ADR-008：测试内联在源文件
+### ADR-008：测试集中放在 `src/tau_agent/tests/`
 
-- **理由**：全 crate 使用 `pub(crate)`，integration test 无法访问；golden 与实现放在一起便于对照。
+- **背景**：早期把 `#[cfg(test)] mod tests` 内联在各源文件里；单测与语料增多后生产文件被测试淹没，不利于与 Python 逐行对照。
+- **决定**：生产文件只放重写代码；测试统一放 `src/tau_agent/tests/`（`<module>.rs` / `differential.rs` / `support.rs`），由 `tests/mod.rs` 统一声明（§5.4）。
+- **理由**：`tests` 是 `tau_agent` 的子模块，`pub(crate)` 仍然可见，不需要放宽可见性；生产文件保持与 Python 一一对照的洁净。
+- **代价**：测试里跨模块的私有导入要显式写出（不能靠 `use super::*;`），迁移测试时要核对导入。
 
 ### ADR-009：差异注释是硬性要求
 
@@ -335,43 +351,34 @@ wire 模型的行为由一套共享语料锁定：Python（pydantic）与 Rust�
 - `provider.rs` + `tests/provider.rs`（1 test）：`CancellationToken` / `ModelProvider` + `futures-core::Stream` 事件流（ADR-010）。
 - `tests/differential.rs`（3 tests）：Python↔Rust 双端差分（212 条语料、12 种 kind、normal/extreme/edge、含现场 Python 校验），见 §5。
 - `tests/support.rs`：测试专用的 `block_on`；生产文件不含任何测试代码。
+- 复用要点：`AgentTool` 含闭包、不可 `Clone`，provider 侧只能传 `&[AgentTool]`；事件流消费端用 `StreamExt::next()`（`futures-util` 或 `tokio_stream` 二选一，loop 落地时定）或测试里的 `poll_fn`。
 
-### 7.2 建议顺序与已知坑
+### 7.2 重写顺序与已知坑
 
-先 portable core（`tau_agent`），再 `tau_ai`；`tau_coding` 最后。
+先 portable core（`tau_agent`），再 `tau_ai`；`tau_coding` 最后。已完成项见 §7.1，本节只列剩余工作。
 
-1. ~~**`tools.rs`（Python 118 行）**~~ ✅ 已完成
-   - `AgentToolResult.content` 复用 `messages::ToolResultContent`；`details` 为 `Option<JsonValue>`；`added_tool_names` 带 snake alias。
-   - Protocol/Callable → 箱式闭包类型别名：`ToolCallRenderer` / `ToolResultRenderer` / `ToolExecutor` / `ToolUpdateCallback` / `ToolArgumentPreparer`。
-   - 执行器返回 `ToolFuture = Pin<Box<dyn Future<Output = AgentToolResult> + Send + 'static>>`（无运行时依赖）；`ToolUpdateCallback` 是 `FnMut`，捕获状态请用 `Arc<Mutex<...>>`。
-2. ~~**`provider.rs`（37 行）— 本轮最大未决：async。**~~ ✅ 已完成（ADR-010）
-   - `AsyncIterator[AssistantMessageEvent]` → `Pin<Box<dyn Stream<Item = AssistantMessageEvent> + Send + 'a>>`（`futures-core`）。
-   - `stream_response<'a>(&'a self, model: &'a str, system: &'a str, messages: &'a [AgentMessage], tools: &'a [AgentTool], signal: Option<Arc<dyn CancellationToken>>, session_id: Option<&'a str>) -> Pin<Box<dyn Stream<Item = AssistantMessageEvent> + Send + 'a>>`。
-   - Python 的 `session_id: str | None` 必须用 `Option<&str>`（你之前写成了 `Option<AssistantMessageEvent>`）。
-   - `AgentTool` 含闭包、不可 `Clone`，所以 `tools` 只能传引用切片。
-   - 消费端用 `StreamExt::next()`（需要 `futures-util` 或 `tokio_stream`）或测试里的 `poll_fn`；loop 落地时决定。
-3. **`events.rs`（87 行）**
-   - `AgentEvent` 是 `discriminator="type"` 的 union，且只在 union 路径使用 → 按 4.4-B。
+1. **`events.rs`（87 行）**
+   - `AgentEvent` 是 `discriminator="type"` 的 union，且只在 union 路径使用 → 按 §4.4 情况 B（internally tagged）。
    - payload 嵌套 `AgentMessage` / `ToolResultMessage` / `AgentToolResult` / `AssistantMessageEvent`，注意多层 tag 并存。
    - `args: dict` → `JsonObject`。
-4. **`tool_history.rs`（169 行）**
+2. **`tool_history.rs`（169 行）**
    - 纯逻辑、无 serde 模型；`isinstance` → 穷尽 `match`。
    - `diagnostic_data()` 是**手写 camelCase key**（`synthesizedResults` 等），不是 serde 模型；必须手写 + 测试。
-   - 算法语义逐条对齐：先占用"已相邻"结果 → 合成缺失结果（文案 `"Tool call interrupted by user"`）→ 丢弃孤儿/重复（真实结果优先于合成结果）→ 重排；四个计数器语义要一致。
-5. **`harness.rs`（259 行）**
-   - `EventListener = Callable[[AgentEvent], Awaitable[None] | None]`：Python 用 `isawaitable` 兼容同步/异步；Rust 需统一签名（建议 async-only，同步闭包用 `async {}` 包）。
+   - 算法语义逐条对齐：先占用“已相邻”结果 → 合成缺失结果（文案 `"Tool call interrupted by user"`）→ 丢弃孤儿/重复（真实结果优先于合成结果）→ 重排；四个计数器语义一致。
+3. **`harness.rs`（259 行）**
+   - Python 的 `EventListener = Callable[[AgentEvent], Awaitable[None] | None]` 靠 `isawaitable` 兼容同步/异步；Rust 没有该机制，统一为 **async listener**，同步逻辑用 `async {}` 包一层。
    - `QueuedMessages` / `AgentHarnessConfig` → struct；queue_mode 状态机、取消、turn 计数。
-6. **`loop.rs`（376 行）**
-   - async generator → Stream（依赖 2 的决策）；事件顺序与 `MessageUpdateEvent` 嵌套是 wire 行为，逐条测试。
-   - `monotonic_ns` → `Instant`；first-output 判定集合 = TextDelta / ThinkingDelta / ToolCallStart / Delta / End，写成明确 predicate。
-   - `max_turns < 1` 与超限错误文案要和 `_error_message` 一致。
-7. **`session/entries.rs`（144 行）**
-   - ⚠️ **entry 的 `timestamp` 是 float 秒**（`time()`），messages 是 int 毫秒；迁移时还会出现毫秒 ÷ 1000。
+4. **`loop.rs`（376 行）**
+   - async generator → `futures-core::Stream`（ADR-010）；事件顺序与 `MessageUpdateEvent` 嵌套是 wire 行为，逐条测试。
+   - `monotonic_ns` → `Instant`；first-output 判定集合 = `TextDelta` / `ThinkingDelta` / `ToolCallStart` / `ToolCallDelta` / `ToolCallEnd`，写成具名 predicate。
+   - `max_turns < 1` 与超限错误文案要和 Python `_error_message` 一致。
+5. **`session/entries.rs`（144 行）**
+   - ⚠️ entry 的 `timestamp` 是 **float 秒**（`time()`），messages 是 **int 毫秒**；迁移时还会出现毫秒 ÷ 1000。
    - `replaces_entry_ids` 有 `exclude_if=lambda ids: not ids`：**空列表序列化时要省略**，反序列化要默认空列表。
-   - `type: Literal[...]` 是 union 判别子且 entry 只经 union 使用 → internally tagged。
+   - `type: Literal[...]` 是 union 判别子且 entry 只经 union 使用 → internally tagged（§4.4 情况 B）。
    - `extra="forbid"`；`parent_id: str | None`。
-8. **`session/jsonl.rs`（171 行）— legacy 兼容的唯一入口**
-   - 写：`exclude_none=True`、单行 JSON；Rust 需递归剪 null。
+6. **`session/jsonl.rs`（171 行）— legacy 兼容的唯一入口**
+   - 写：`exclude_none=True`、单行 JSON；Rust 需递归剪 null（ADR-006）。
    - 读：JSON 解析 → `_migrate_session_entry` → 严格 validate；错误带行号。
    - `_migrate_message` legacy 表（用 Python `tests/fixtures/legacy_compaction.jsonl` 做 fixture 逐条测试）：
      - user + `custom_type`/`customType` → role `custom`
@@ -379,13 +386,13 @@ wire 模型的行为由一套共享语料锁定：Python（pydantic）与 Rust�
      - role `tool` → `toolResult`；`name`→`toolName`；`tool_call_id`→`toolCallId`；`ok`→`isError=!ok`；string content→blocks；`data`+`details` 合并；`error`→内容兜底
      - entry `type=="custom_message"`：`customType`→`custom_type`
      - 无 target 的 `label` → 最早 branchable entry
-9. **`session/storage.rs`（203）/ `memory.rs`（208）/ `tree.rs`（40）**
-   - 文件与内存存储、树结构；`new_entry_id()`（定义在 `entries.py`）用 UUID（依赖未定）；文件写入的原子性/恢复语义按 Python 实现逐条对齐。
-10. **`tau_ai/`（约 5400 行，最大块）**
-    - 抽象：`provider.py`、`stream.py`、`content.py`、`_provider_events.py`；基础设施：`http.py`、`retry.py`、`http_errors.py`、`env.py`、`model_catalog.py`、`model_limits.py`；各家 provider：`openai_compatible`、`anthropic`、`google`、`mistral`、`openai_codex`、`fake` 等。
-    - **未决**：HTTP/SSE 依赖选型、重试/超时策略、代理与 env 处理、model catalog JSON 的打包方式。
-    - `_provider_events.py` 的 `ProviderToolCallEvent.tool_call: ToolCall` 现在可直接复用 messages.rs 的单飞 `ToolCall`。
-11. **`tau_coding/**`：CLI / TUI / RPC / session_export**，依赖 Textual/Rich 等 Python 生态，**明确暂缓**；先把 portable core 做稳。
+7. **`session/storage.rs`（203）/ `memory.rs`（208）/ `tree.rs`（40）**
+   - 文件与内存存储、树结构；`new_entry_id()`（定义在 `entries.py`）需要 UUID（依赖见 §8 第 7 条）；文件写入的原子性/恢复语义按 Python 实现逐条对齐。
+8. **`tau_ai/`（约 5400 行，最大块）**
+   - 抽象：`provider.py`、`stream.py`、`content.py`、`_provider_events.py`；基础设施：`http.py`、`retry.py`、`http_errors.py`、`env.py`、`model_catalog.py`、`model_limits.py`；各家 provider：`openai_compatible`、`anthropic`、`google`、`mistral`、`openai_codex`、`fake` 等。
+   - 依赖选型见 §8 第 3、4、5 条。
+   - `_provider_events.py` 的 `ProviderToolCallEvent.tool_call: ToolCall` 可直接复用 messages.rs 的单飞 `ToolCall`。
+9. **`tau_coding/**`**：CLI / TUI / RPC / session_export，依赖 Textual/Rich 等 Python 生态，**明确暂缓**；先把 portable core 做稳。
 
 ### 7.3 不要做的事
 
@@ -394,18 +401,19 @@ wire 模型的行为由一套共享语料锁定：Python（pydantic）与 Rust�
 - 不要手写 `model_expected.jsonl` 或绕过 `tools/fixtures.sh` 修改语料；Python expected 只能由 pydantic 实跑生成。
 - 不要把 `divergence` case 当成 bug 修掉：它们是有意为之的 strictness 差异，改动前先看 §5.2。
 - 不要给模型层加 `skip_serializing_if` 图省事（破坏 `model_dump_json()` 对齐）。
-- 目前 crate 是 binary，不要把 `pub(crate)` 提升为 `pub`（API 边界见第 8 节）。
+- 目前 crate 是 binary，不要把 `pub(crate)` 提升为 `pub`（API 边界见 §8）。
 
 ---
 
 ## 8. 未决问题（需要拍板并升级为 ADR）
 
 1. **crate 形态**：继续 binary-only，还是加 `lib.rs`（集成测试、SDK、未来 workspace 都需要）。加 lib 后要重新审视 `pub(crate)` 策略。
-2. **错误处理策略**：核心 portable 层建议自定义 error enum（可后续引入 `thiserror`），应用层再用 `anyhow` 之类。
-3. **HTTP / SSE 依赖**选型。
+2. **错误处理策略**：核心 portable 层自定义 error enum 还是引入 `thiserror`，应用层是否用 `anyhow`；引入任何新 crate 都要先写 ADR。
+3. **HTTP / SSE 依赖**选型（阻塞 `tau_ai` 适配器）。
 4. **数据文件打包**：model catalog 等 JSON 用 `include_str!` 还是运行时资源。
 5. **cargo features 划分**：是否按 provider 拆 feature（首版可全量）。
-6. **Python facade（`__init__.py`）的处理**：是否在 Rust 提供等价 re-export 模块，还是按模块直接引用。
+6. **`tau_agent` 顶层 facade**：是否提供对应 Python `__init__.py` 的聚合重导出；逐模块 facade（`tau_ai/events.py`、`tau_ai/provider.py`）已照抄，不需再议。
+7. **UUID 依赖**：`session/entries.py` 的 `new_entry_id()` 用 `uuid4`；选 `uuid` crate 还是自实现（连同时间/随机源一起写 ADR）。
 
 ---
 
@@ -413,13 +421,13 @@ wire 模型的行为由一套共享语料锁定：Python（pydantic）与 Rust�
 
 - [ ] 通读 Python 原文件，记录所有 `Literal` / 默认值 / validator / drop-in 便利
 - [ ] 用 Python 实跑语义探针（accept/reject、dump 形状、边界）
-- [ ] 按第 4 节写 Rust；模块头写 deviations
+- [ ] 按 §4 写 Rust；模块头写 deviations
 - [ ] 复用已有模型（如 `ToolResultContent`、`JsonObject`），不重复定义
 - [ ] 若是 wire 模型：在 `tools/model_corpus.py` 补 normal/extreme/edge 三类 case
 - [ ] `./tools/fixtures.sh` 重生语料；新分歧同时设 `divergence` + `rust` 并在 §5.2 登记
 - [ ] 单测齐全（含 alias、默认值、拒绝用例、drift）
 - [ ] `cargo fmt` + `cargo test` + `./tools/fixtures.sh --check` + `cargo clippy --all-targets`
-- [ ] 更新第 7 节状态表；新取舍补 ADR
+- [ ] 更新 §7.1 / §5.2；新取舍补 §6 ADR
 
 ---
 
@@ -445,31 +453,31 @@ print(AssistantMessage(content=[TextContent(text="x")], timestamp=1).model_dump_
 PY
 ```
 
-### 10.2 golden 生成模板
+### 10.2 语义探针与一次性 golden 模板
 
 ```python
-# 生成 Rust 测试用的字面量：先想清楚要锁的行为，再粘贴输出
+# 语义探针：先看 Python 实际接受/拒绝什么，再写 Rust（不要凭印象）
+from pydantic import TypeAdapter, ValidationError
+from tau_agent.messages import AgentMessage
+
+for label, payload in [
+    ("user string", {"role": "user", "content": "x"}),
+    ("missing role", {"content": "x"}),
+]:
+    try:
+        TypeAdapter(AgentMessage).validate_python(payload)
+        print(f"OK   {label}")
+    except ValidationError:
+        print(f"FAIL {label}")
+```
+
+```python
+# 一次性 golden：只用于内部行为或短 wire 断言，把输出贴进 Rust 测试
 from tau_agent.messages import AssistantMessage, TextContent
 print(AssistantMessage(content=[TextContent(text="x")], timestamp=1).model_dump_json())
 ```
 
-```python
-# accept/reject 结论：给差分语料用（见 §5.1），不收集异常文本
-import json
-from pydantic import TypeAdapter, ValidationError
-from tau_agent.messages import AgentMessage
-
-cases = [("user string", {"role": "user", "content": "x"}), ...]
-adapter = TypeAdapter(AgentMessage)
-for label, payload in cases:
-    try:
-        adapter.validate_python(payload)
-        ok = True
-    except ValidationError:
-        ok = False
-    compact = json.dumps(payload, separators=(",", ":"))
-    print(f'    (r#"{compact}"#, {str(ok).lower()}), // {label}')
-```
+> wire 模型的系统性覆盖走差分语料（§5.1）：改 `tools/model_corpus.py` 后运行 `./tools/fixtures.sh`，不要手写 `model_expected.jsonl`。
 
 ### 10.3 pydantic ↔ serde 语义对照速查
 
@@ -488,13 +496,15 @@ for label, payload in cases:
 | dict 键序 | 保序 | `preserve_order` | 4.7 |
 | `exclude_none` | dump 选项 | 手写递归剪除 | session 层 |
 | 默认参数 | 函数默认值 | `IntoIterator` / 构造器 | 4.9 |
-| Protocol | 结构化子类型 | trait | 按模块决策 |
-| async iterator | `AsyncIterator` | Stream（未决） | 第 8 节 |
+| Protocol | 结构化子类型 | trait / 箱式闭包 | 先例：`tools.rs` 闭包；`provider.rs` trait |
+| async iterator | `AsyncIterator` | `futures-core::Stream` | 直接返回 `Pin<Box<dyn Stream<Item=...> + Send + 'a>>`（ADR-010） |
 | `dataclass(frozen)` | 不可变值对象 | struct + `Clone` | — |
 
 ---
 
 ### 10.4 验证记录（2026-09-18）
+
+> 本节只是证据档案；重写路线看 §4 / §5 / §7，不必通读本节。
 
 本文档的事实性断言不是凭记忆写的：逐条对照 **实际运行结果** 与 **对应版本官方文档/源码** 双重验证。依赖或 Python 版本升级后必须重跑本节探针并更新结论。
 
