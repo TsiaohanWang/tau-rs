@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Generate the Python-side fixtures for the differential corpus.
 
-Run with the tau virtualenv so pydantic is available (or use
-`tools/fixtures.sh`, which resolves it):
+Run `./tools/setup-reference.sh` once, then use `tools/fixtures.sh` (which
+resolves the vendored interpreter):
 
-    ../tau/.venv/bin/python tools/gen_fixtures.py           # write fixtures
-    ../tau/.venv/bin/python tools/gen_fixtures.py --check   # verify only
-    ../tau/.venv/bin/python tools/gen_fixtures.py --stdout  # print expected JSONL
+    ./tools/fixtures.sh            # write fixtures
+    ./tools/fixtures.sh --check    # verify only
+    ./tools/fixtures.sh --stdout   # print expected JSONL
 
 The Rust differential test (`src/tau_agent/tests/differential.rs`) replays
 `tests/fixtures/model_corpus.jsonl` and compares its results against
-`tests/fixtures/model_expected.jsonl`, and - when the tau venv is available -
-against a live run of this script with `--stdout`.
+`tests/fixtures/model_expected.jsonl`, and - when the vendored tau venv is
+available - against a live run of this script with `--stdout`.
+
+Run `./tools/setup-reference.sh` once to create `reference/tau/.venv`.
 """
 
 from __future__ import annotations
@@ -22,7 +24,12 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT.parent / "tau" / "src"))
+TAU_SRC = ROOT / "reference" / "tau" / "src"
+if not TAU_SRC.is_dir():
+    raise SystemExit(
+        "reference/tau missing: run tools/vendor-tau.sh, then tools/setup-reference.sh"
+    )
+sys.path.insert(0, str(TAU_SRC))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from model_corpus import CASES  # noqa: E402

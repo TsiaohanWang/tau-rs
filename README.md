@@ -17,21 +17,27 @@ src/tau_agent/            生产代码：Python tau_agent/ 的逐模块重写
     support.rs            测试专用工具（block_on）
 src/tau_ai/               tau_ai facade（重导出）；provider 适配器待写
 src/main.rs               stub 入口
+reference/
+  REVISION                vendored tau 的 commit SHA（版本锁）
+  VENDORED.md             来源、版本、升级流程、只读规则
+  tau/                    上游 tau 快照（只读，含 LICENSE；.venv 本地生成、不提交）
 tests/fixtures/           差分语料（model_corpus.jsonl / model_expected.jsonl）
-tools/                    语料源（model_corpus.py）与生成脚本（gen_fixtures.py / fixtures.sh）
+tools/                    语料源（model_corpus.py）与脚本（fixtures.sh / setup-reference.sh / vendor-tau.sh）
 AGENTS.md                 重写指南：约定、ADR、路线图、测试方法论（开工前先读）
 ```
 
 ## 常用命令
 
 ```bash
+./tools/setup-reference.sh     # 一次性：创建 reference/tau/.venv（uv sync --frozen）
 cargo test                     # 生产代码 + 双端差分测试
 cargo clippy --all-targets
-./tools/fixtures.sh            # 用 Python/pydantic 重新生成差分语料
+./tools/fixtures.sh            # 用 vendored Python/pydantic 重新生成差分语料
 ./tools/fixtures.sh --check    # 校验提交的语料与 Python 行为一致
+./tools/vendor-tau.sh <ref>    # 升级 vendored 快照（详见 reference/VENDORED.md）
 ```
 
-Python 权威源在 `../tau/`。差分测试会现场调用 `../tau/.venv/bin/python`（可用 `TAU_PYTHON` 覆盖；找不到解释器时跳过 live 对比，仅比对提交的 fixtures）。
+Python 权威源是本仓库内的只读快照 `reference/tau/`（见 `reference/VENDORED.md`）。差分测试会现场调用 `reference/tau/.venv/bin/python`（可用 `TAU_PYTHON` 覆盖；未建环境时跳过 live 对比，仅比对提交的 fixtures）。
 
 ## 状态
 

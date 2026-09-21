@@ -3,7 +3,7 @@
 > 本文档是 tau-rs 的**权威重写约定与决策记录**，面向所有参与重写的工程师与 AGENT。
 > 开工任何模块前请完整读一遍；模块完成后回来更新 §7 状态表、§5.2 分歧登记与 §6 ADR。
 >
-> - Python 权威源：`../tau/src/`（与 `tau-rs/` 同级目录），解释器 `../tau/.venv/bin/python`。
+> - Python 权威源：`reference/tau/`（vendored 快照，只读，见 §3.1）；解释器 `reference/tau/.venv/bin/python`（由 `./tools/setup-reference.sh` 创建）。
 > - 本文语言约定：正文中文，标识符、命令、代码保持英文原文。
 > - 冲突处理：**Python 源码是 wire 行为的基准；§6 ADR 明确记录的有意差异以 ADR 为准**；其余冲突以 Python 为准。任何"顺手修正"都要先升级为 ADR。
 > - 事实性断言于 2026-09-18 对照固定版本（pydantic 2.13.4 / serde 1.0.229 / serde_json 1.0.151 / futures-core 0.3.34）逐条验证，证据见 §10.4；升级依赖后必须重跑探针。
@@ -12,7 +12,8 @@
 
 ## 0. 给 AGENT 的快速导航
 
-- **任务**：把 `../tau/src/tau_agent`（之后是 `tau_ai`）逐模块改写成 Rust，wire 行为与 Python 等价。
+- **任务**：把 `reference/tau/src/tau_agent`（之后是 `tau_ai`）逐模块改写成 Rust，wire 行为与 Python 等价。
+- **开工前**：`./tools/setup-reference.sh` 建好 vendored Python 环境。
 - **进度与下一步**：§3 状态表 + §7.2 顺序列表。
 - **写代码前必读**：§1 总原则、§4 Golden Rules；对照样板 `messages.rs`、`provider_events.rs`、`tools.rs`、`provider.rs`。
 - **写测试前必读**：§5；改 wire 模型必须先重生差分语料。
@@ -57,7 +58,7 @@
 
 ## 3. 目录与分层映射
 
-两个仓库是同级目录：`tau-rs/`（本仓库）与 `../tau/`（Python）。
+`reference/tau/` 是冻结的 Python 权威源（vendored 快照，见 §3.1）；下表是逐模块映射。
 
 | Python | Rust | 状态 |
 |---|---|---|
@@ -85,6 +86,15 @@
 - 目前是单 binary crate（`src/main.rs`）。是否增加 `lib.rs` 见 §8。
 - 生产文件（`messages.rs` 等）只放重写代码；测试统一放 `src/tau_agent/tests/`（`<module>.rs` / `differential.rs` / `support.rs`）。
 - crate 根的 `tests/fixtures/` 只放数据（差分语料、legacy session JSONL），`tools/` 只放语料源与生成脚本；两者都不参与生产编译。
+
+### 3.1 参考仓库：`reference/tau/`（vendored，只读）
+
+- **位置**：`reference/tau/`，是上游提交的 `git archive` 导出（含 LICENSE），不是 git submodule，也不是生产代码。
+- **锁定**：`reference/REVISION` 记录精确 commit SHA；`reference/VENDORED.md` 记录来源、版本、日期与升级流程。
+- **环境**：`./tools/setup-reference.sh` 在 `reference/tau/` 内执行 `uv sync --frozen`，依赖由 vendored `uv.lock` 锁定（pydantic 2.13.4）；`reference/tau/.venv/` 已 gitignore。
+- **解释器解析顺序**：`TAU_PYTHON` → `reference/tau/.venv/bin/python` → 生成语料报错、live 对比跳过。
+- **只读铁律**：禁止修改 `reference/tau/**`。需要不同行为就改 Rust；若认为 Python 源码本身不对，开 ADR，不得就地修补。
+- **升级流程**（唯一允许改快照的方式）：`./tools/vendor-tau.sh <sha-or-tag>` → `./tools/fixtures.sh` → `cargo test` → 单独提交；行为漂移会在语料 diff 与测试中显形。
 
 ---
 
@@ -219,7 +229,7 @@ wire 模型的行为由一套共享语料锁定：Python（pydantic）与 Rust�
 - **生成物（提交到仓库，Rust 测试直接读）**：
   - `tests/fixtures/model_corpus.jsonl`：输入；
   - `tests/fixtures/model_expected.jsonl`：Python 端的 accept/reject 与规范化输出。
-- **生成命令**：`./tools/fixtures.sh`（自动用 `../tau/.venv/bin/python`，可用 `TAU_PYTHON` 覆盖）；`./tools/fixtures.sh --check` 只校验不写。
+- **生成命令**：`./tools/fixtures.sh`（自动用 `reference/tau/.venv/bin/python`，可用 `TAU_PYTHON` 覆盖）；`./tools/fixtures.sh --check` 只校验不写。
 - **Rust 对比**：`src/tau_agent/tests/differential.rs`
   1. `differential_corpus_matches_python_fixture`：重放语料，逐字节对比 Python 的 accept/reject 与输出；
   2. `differential_corpus_matches_live_python`：现场执行 `tools/gen_fixtures.py --stdout`，与提交的 expected 对比（找不到解释器时跳过并提示）；
@@ -380,7 +390,7 @@ wire 模型的行为由一套共享语料锁定：Python（pydantic）与 Rust�
 6. **`session/jsonl.rs`（171 行）— legacy 兼容的唯一入口**
    - 写：`exclude_none=True`、单行 JSON；Rust 需递归剪 null（ADR-006）。
    - 读：JSON 解析 → `_migrate_session_entry` → 严格 validate；错误带行号。
-   - `_migrate_message` legacy 表（用 Python `tests/fixtures/legacy_compaction.jsonl` 做 fixture 逐条测试）：
+   - `_migrate_message` legacy 表（用 `reference/tau/tests/fixtures/legacy_compaction.jsonl` 做 fixture 逐条测试）：
      - user + `custom_type`/`customType` → role `custom`
      - assistant：string content → text block；`tool_calls`/`toolCalls` → blocks；`usage.cost is None` → `{}`
      - role `tool` → `toolResult`；`name`→`toolName`；`tool_call_id`→`toolCallId`；`ok`→`isError=!ok`；string content→blocks；`data`+`details` 合并；`error`→内容兜底
@@ -446,8 +456,8 @@ cargo clippy --all-targets
 ./tools/fixtures.sh --check    # 只校验提交的语料是否漂移
 cargo test differential_       # 只跑双端对比
 
-# 在 ../tau/（Python 权威源）
-../tau/.venv/bin/python - <<'PY'
+# 在 tau-rs/ 下用 vendored 解释器
+reference/tau/.venv/bin/python - <<'PY'
 from tau_agent.messages import *
 print(AssistantMessage(content=[TextContent(text="x")], timestamp=1).model_dump_json())
 PY
@@ -525,7 +535,7 @@ print(AssistantMessage(content=[TextContent(text="x")], timestamp=1).model_dump_
 1. **Python 实跑探针**：对 pydantic 语义直接 `validate_python` / `model_dump_json`，记录 OK/FAIL（模板见 §10.2）。
 2. **Rust 固定版本探针**：`serde = "=1.0.229"`、`serde_json = "=1.0.151"` 的最小工程，实测下表 serde 行为（复跑见下）。
 3. **官方文档/源码（对应版本）**：docs.rs 固定版本页面、serde.rs、vendored crate 源码、pydantic 2.13 文档、Cargo Book。
-4. **双端差分语料**：`tests/fixtures/` 下 212 条 case，Python/pydantic 生成 expected，Rust 重放并逐字节对比；`differential_corpus_matches_live_python` 还会现场调用 `../tau/.venv/bin/python` 复跑（§5.1）。分歧 case 在 §5.2 登记。
+4. **双端差分语料**：`tests/fixtures/` 下 212 条 case，Python/pydantic 生成 expected，Rust 重放并逐字节对比；`differential_corpus_matches_live_python` 还会现场调用 `reference/tau/.venv/bin/python` 复跑（§5.1）。分歧 case 在 §5.2 登记。
 
 **引用文档（均为对应版本）**
 
@@ -540,7 +550,7 @@ print(AssistantMessage(content=[TextContent(text="x")], timestamp=1).model_dump_
 
 | # | 断言 | 证据 |
 |---|---|---|
-| 1 | `WireModel` 配置 = `extra="forbid"` / `validate_by_name=True` / `validate_by_alias=True` / `serialize_by_alias=True` / `alias_generator=_to_camel` | `../tau/src/tau_agent/messages.py:14-33` + Python 探针打印 `model_config` |
+| 1 | `WireModel` 配置 = `extra="forbid"` / `validate_by_name=True` / `validate_by_alias=True` / `serialize_by_alias=True` / `alias_generator=_to_camel` | `reference/tau/src/tau_agent/messages.py:14-33` + Python 探针打印 `model_config` |
 | 2 | `_to_camel("cache_write_1h") == "cacheWrite1H"`（`str.title()` 把 `1h` 变 `1H`） | Python 探针 + `messages.py:14` |
 | 3 | `AgentMessage` 缺 `role` 报错；单类 `model_validate` 缺 `role` 取默认值（user/assistant/toolResult） | Python 探针（`TypeAdapter(AgentMessage)` vs `UserMessage.model_validate`） |
 | 4 | content block 缺 `type` 取默认；`type` 与载荷不匹配被拒 | Python 探针 |
@@ -564,7 +574,7 @@ print(AssistantMessage(content=[TextContent(text="x")], timestamp=1).model_dump_
 **复跑探针**
 
 ```bash
-# Python（在 ../tau/ 下）
+# Python（在 reference/tau/ 下）
 .venv/bin/python - <<'PY'
 from tau_agent.messages import _to_camel, WireModel, Usage, AgentMessage
 from pydantic import TypeAdapter, ValidationError

@@ -210,7 +210,9 @@ fn differential_corpus_covers_every_kind_and_group() {
 #[test]
 fn differential_corpus_matches_live_python() {
     let Some(python) = python_interpreter() else {
-        eprintln!("skipping live Python check: no interpreter found (set TAU_PYTHON)");
+        eprintln!(
+            "skipping live Python check: no interpreter found (run tools/setup-reference.sh or set TAU_PYTHON)"
+        );
         return;
     };
     let script = manifest_dir().join("tools/gen_fixtures.py");
@@ -267,6 +269,6 @@ fn python_interpreter() -> Option<PathBuf> {
         let path = PathBuf::from(path);
         return path.exists().then_some(path);
     }
-    let venv = manifest_dir().join("../tau/.venv/bin/python");
+    let venv = manifest_dir().join("reference/tau/.venv/bin/python");
     venv.exists().then_some(venv)
 }
